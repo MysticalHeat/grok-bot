@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Gemini Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-gemini-bot
+ExecStart=/opt/telegram-gemini-bot/telegram-gemini-bot
+EnvironmentFile=/opt/telegram-gemini-bot/.env
+Restart=always
+RestartSec=5
+User=telegrambot
+Group=telegrambot
+
+[Install]
+WantedBy=multi-user.target
