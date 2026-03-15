@@ -37,6 +37,8 @@ const (
 	defaultMaxImageBytes  = 8 * 1024 * 1024
 )
 
+var seoulLocation = mustLoadLocation("Asia/Seoul")
+
 var preferredModels = []string{
 	"gemini-3.1-flash-lite-preview",
 	"gemini-3.1-flash-lite",
@@ -108,6 +110,20 @@ type TavilySearchResult struct {
 	URL     string `json:"url"`
 	Content string `json:"content"`
 	Score   any    `json:"score,omitempty"`
+}
+
+type CafeteriaWeeklyPlan struct {
+	Date            string                     `json:"date"`
+	MenusByMealType map[string][]CafeteriaMenu `json:"menusByMealType"`
+}
+
+type CafeteriaMenu struct {
+	MenuID       int     `json:"menuId"`
+	MenuName     string  `json:"menuName"`
+	MealType     string  `json:"mealType"`
+	Course       string  `json:"course"`
+	AverageScore float64 `json:"averageScore"`
+	ReviewCount  int     `json:"reviewCount"`
 }
 
 func main() {
@@ -680,13 +696,41 @@ func fileExtension(name string) string {
 	return strings.ToLower(name[index:])
 }
 
+func normalizeMenuDate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nowInSeoul().Format("2006-01-02")
+	}
+
+	if _, err := time.Parse("2006-01-02", value); err == nil {
+		return value
+	}
+
+	return nowInSeoul().Format("2006-01-02")
+}
+
+func normalizeMealType(value string) string {
+	value = strings.TrimSpace(strings.ToUpper(value))
+	switch value {
+	case "BREAKFAST", "LUNCH", "DINNER":
+		return value
+	default:
+		return ""
+	}
+}
+
 func (s *BotService) generationConfig() *genai.GenerateContentConfig {
 	config := &genai.GenerateContentConfig{}
-	if !s.searchEnabled() {
+	tools := []*genai.Tool{cafeteriaMenuToolDeclaration()}
+	if s.searchEnabled() {
+		tools = append(tools, webSearchToolDeclaration())
+	}
+
+	if len(tools) == 0 {
 		return config
 	}
 
-	config.Tools = []*genai.Tool{webSearchToolDeclaration()}
+	config.Tools = tools
 	config.ToolConfig = &genai.ToolConfig{
 		FunctionCallingConfig: &genai.FunctionCallingConfig{
 			Mode: genai.FunctionCallingConfigModeAuto,
@@ -742,8 +786,19 @@ func (s *BotService) completeToolFlow(ctx context.Context, baseContents []*genai
 }
 
 func (s *BotService) executeTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
-	if functionCall.Name != "web_search" {
+	switch functionCall.Name {
+	case "web_search":
+		return s.executeWebSearchTool(ctx, functionCall)
+	case "get_cafeteria_menu":
+		return s.executeCafeteriaMenuTool(ctx, functionCall)
+	default:
 		return nil, false, nil
+	}
+}
+
+func (s *BotService) executeWebSearchTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
+	if !s.searchEnabled() {
+		return map[string]any{"ok": false, "error": "web search is disabled"}, true, nil
 	}
 
 	query, _ := functionCall.Args["query"].(string)
@@ -782,6 +837,89 @@ func (s *BotService) executeTool(ctx context.Context, functionCall *genai.Functi
 	response["results"] = results
 
 	return response, true, nil
+}
+
+func (s *BotService) executeCafeteriaMenuTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
+	dateValue, _ := functionCall.Args["date"].(string)
+	mealTypeValue, _ := functionCall.Args["meal_type"].(string)
+
+	targetDate := normalizeMenuDate(dateValue)
+	mealType := normalizeMealType(mealTypeValue)
+	if mealType == "" {
+		mealType = "LUNCH"
+	}
+
+	plan, err := s.fetchCafeteriaWeeklyPlan(ctx, targetDate)
+	if err != nil {
+		return map[string]any{
+			"ok":        false,
+			"date":      targetDate,
+			"meal_type": mealType,
+			"error":     err.Error(),
+		}, true, nil
+	}
+
+	menus := plan.MenusByMealType[mealType]
+	items := make([]map[string]any, 0, len(menus))
+	for _, item := range menus {
+		name := strings.TrimSpace(item.MenuName)
+		if name == "" || name == "*" {
+			continue
+		}
+		items = append(items, map[string]any{
+			"course":        strings.TrimSpace(item.Course),
+			"menu_name":     name,
+			"average_score": item.AverageScore,
+			"review_count":  item.ReviewCount,
+		})
+	}
+
+	log.Printf("cafeteria tool result: date=%s meal_type=%s items=%d", plan.Date, mealType, len(items))
+
+	return map[string]any{
+		"ok":        true,
+		"date":      plan.Date,
+		"meal_type": mealType,
+		"items":     items,
+		"source":    fmt.Sprintf("https://api.arambyeol.com/plans/weekly/%s", targetDate),
+	}, true, nil
+}
+
+func (s *BotService) fetchCafeteriaWeeklyPlan(ctx context.Context, date string) (*CafeteriaWeeklyPlan, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://api.arambyeol.com/plans/weekly/%s", date), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("cafeteria api raw response: date=%s body=%s", date, truncateRunes(strings.TrimSpace(string(body)), 4000))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("cafeteria api failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var plans []CafeteriaWeeklyPlan
+	if err := json.Unmarshal(body, &plans); err != nil {
+		return nil, err
+	}
+
+	for _, plan := range plans {
+		if plan.Date == date {
+			return &plan, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no cafeteria menu found for %s", date)
 }
 
 func (s *BotService) tavilySearch(ctx context.Context, query string) (*TavilySearchResponse, error) {
@@ -846,6 +984,30 @@ func webSearchToolDeclaration() *genai.Tool {
 						},
 					},
 					Required: []string{"query"},
+				},
+			},
+		},
+	}
+}
+
+func cafeteriaMenuToolDeclaration() *genai.Tool {
+	return &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{
+				Name:        "get_cafeteria_menu",
+				Description: "Get today's or a specific day's cafeteria menu from Arambyeol cafeteria API. Use this when the user asks what is served in the cafeteria for breakfast, lunch, or dinner.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"date": {
+							Type:        genai.TypeString,
+							Description: "Optional date in YYYY-MM-DD format. If omitted, use today's date.",
+						},
+						"meal_type": {
+							Type:        genai.TypeString,
+							Description: "Optional meal type: BREAKFAST, LUNCH, or DINNER. If omitted, default to LUNCH.",
+						},
+					},
 				},
 			},
 		},
@@ -1137,6 +1299,8 @@ func buildContents(systemPrompt string, history []ChatMessage, userText string) 
 		contents = append(contents, genai.NewContentFromText(systemPrompt, genai.RoleUser))
 	}
 
+	contents = append(contents, genai.NewContentFromText(currentDateContext(), genai.RoleUser))
+
 	for _, message := range history {
 		var role genai.Role = genai.RoleUser
 		if message.Role == "assistant" {
@@ -1151,6 +1315,44 @@ func buildContents(systemPrompt string, history []ChatMessage, userText string) 
 	}
 
 	return contents
+}
+
+func nowInSeoul() time.Time {
+	return time.Now().In(seoulLocation)
+}
+
+func currentDateContext() string {
+	now := nowInSeoul()
+	return fmt.Sprintf("Текущая дата и время для всех относительных запросов: %s (Asia/Seoul). День недели: %s.", now.Format("2006-01-02 15:04:05"), weekdayRu(now.Weekday()))
+}
+
+func weekdayRu(day time.Weekday) string {
+	switch day {
+	case time.Monday:
+		return "понедельник"
+	case time.Tuesday:
+		return "вторник"
+	case time.Wednesday:
+		return "среда"
+	case time.Thursday:
+		return "четверг"
+	case time.Friday:
+		return "пятница"
+	case time.Saturday:
+		return "суббота"
+	case time.Sunday:
+		return "воскресенье"
+	default:
+		return "неизвестно"
+	}
+}
+
+func mustLoadLocation(name string) *time.Location {
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return time.FixedZone(name, 9*60*60)
+	}
+	return location
 }
 
 func buildContentsWithPhoto(systemPrompt string, history []ChatMessage, userText string, imageBytes []byte, mimeType string) []*genai.Content {
