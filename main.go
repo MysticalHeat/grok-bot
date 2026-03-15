@@ -11,6 +11,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -49,6 +50,7 @@ type Config struct {
 	GeminiModel      string
 	TavilyAPIKey     string
 	TriggerAlias     string
+	GeminiProxy      string
 	SystemPrompt     string
 	SystemPromptFile string
 	PollTimeoutSec   int
@@ -125,9 +127,15 @@ func main() {
 	}
 	defer store.Close()
 
+	geminiHTTPClient, err := newGeminiHTTPClient(cfg.GeminiProxy)
+	if err != nil {
+		log.Fatalf("create gemini http client: %v", err)
+	}
+
 	geminiClient, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  cfg.GeminiAPIKey,
-		Backend: genai.BackendGeminiAPI,
+		APIKey:     cfg.GeminiAPIKey,
+		Backend:    genai.BackendGeminiAPI,
+		HTTPClient: geminiHTTPClient,
 	})
 	if err != nil {
 		log.Fatalf("create gemini client: %v", err)
@@ -166,6 +174,9 @@ func main() {
 	} else {
 		log.Printf("web search: disabled")
 	}
+	if cfg.GeminiProxy != "" {
+		log.Printf("gemini proxy: enabled")
+	}
 	log.Printf("sqlite: %s", cfg.SQLitePath)
 
 	updatesCfg := tgbotapi.NewUpdate(0)
@@ -199,6 +210,7 @@ func loadConfig() (Config, error) {
 		GeminiModel:      getEnv("GEMINI_MODEL", defaultModel),
 		TavilyAPIKey:     strings.TrimSpace(os.Getenv("TAVILY_API_KEY")),
 		TriggerAlias:     normalizeTriggerAlias(getEnv("TRIGGER_ALIAS", "@grok")),
+		GeminiProxy:      strings.TrimSpace(os.Getenv("GEMINI_PROXY")),
 		SystemPrompt:     getEnv("SYSTEM_PROMPT", defaultSystemPrompt),
 		SystemPromptFile: getEnv("SYSTEM_PROMPT_FILE", ""),
 		PollTimeoutSec:   getEnvAsInt("POLL_TIMEOUT_SECONDS", defaultPollTimeoutSec),
@@ -249,6 +261,23 @@ func loadConfig() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func newGeminiHTTPClient(proxyAddress string) (*http.Client, error) {
+	transport := &http.Transport{}
+
+	if strings.TrimSpace(proxyAddress) != "" {
+		proxyURL, err := url.Parse(strings.TrimSpace(proxyAddress))
+		if err != nil {
+			return nil, fmt.Errorf("parse GEMINI_PROXY: %w", err)
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+
+	return &http.Client{
+		Timeout:   45 * time.Second,
+		Transport: transport,
+	}, nil
 }
 
 func (s *BotService) HandleMessage(ctx context.Context, message *tgbotapi.Message) error {

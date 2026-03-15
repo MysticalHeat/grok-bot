@@ -9,8 +9,7 @@ WorkingDirectory=/opt/telegram-gemini-bot
 ExecStart=/opt/telegram-gemini-bot/telegram-gemini-bot
 EnvironmentFile=/opt/telegram-gemini-bot/.env
 Environment=SQLITE_PATH=/var/lib/telegram-gemini-bot/bot.db
-Environment=HTTP_PROXY=http://127.0.0.1:8888
-Environment=HTTPS_PROXY=http://127.0.0.1:8888
+Environment=GEMINI_PROXY=http://127.0.0.1:8888
 Restart=always
 RestartSec=5
 User=telegrambot
