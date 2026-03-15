@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	defaultModel          = "gemini-2.5-flash"
+	defaultModel          = "gemini-3.1-flash-lite-preview"
 	defaultPollTimeoutSec = 30
 	defaultHistoryLimit   = 12
 	defaultSystemPrompt   = "Отвечай кратко и по делу на русском языке, если пользователь не просит иначе."
@@ -38,6 +38,8 @@ const (
 )
 
 var preferredModels = []string{
+	"gemini-3.1-flash-lite-preview",
+	"gemini-3.1-flash-lite",
 	"gemini-2.5-flash",
 	"gemini-2.0-flash-001",
 	"gemini-2.0-flash",

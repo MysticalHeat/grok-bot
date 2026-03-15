@@ -30,7 +30,7 @@ go run .
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
 - `GEMINI_API_KEY` — API key Gemini
-- `GEMINI_MODEL` — по умолчанию `gemini-2.5-flash`
+- `GEMINI_MODEL` — по умолчанию `gemini-3.1-flash-lite-preview`
 - `TAVILY_API_KEY` — включает веб-поиск через Tavily; если не задан, бот работает без интернета
 - `TRIGGER_ALIAS` — текстовый алиас для вызова бота в группе, по умолчанию `@grok`
 - `SYSTEM_PROMPT` — базовая инструкция для модели
