@@ -11,10 +11,8 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +23,12 @@ import (
 	"github.com/joho/godotenv"
 	"google.golang.org/genai"
 	_ "modernc.org/sqlite"
+	"telegram-gemini-bot/internal/llm"
 )
 
 const (
 	defaultModel          = "gemini-3.1-flash-lite-preview"
+	defaultAIBackend      = "gemini"
 	defaultPollTimeoutSec = 30
 	defaultHistoryLimit   = 12
 	defaultSystemPrompt   = "Отвечай кратко и по делу на русском языке, если пользователь не просит иначе."
@@ -49,20 +49,26 @@ var preferredModels = []string{
 }
 
 type Config struct {
-	TelegramToken    string
-	GeminiAPIKey     string
-	GeminiModel      string
-	TavilyAPIKey     string
-	TriggerAlias     string
-	GeminiProxy      string
-	SystemPrompt     string
-	SystemPromptFile string
-	PollTimeoutSec   int
-	HistoryLimit     int
-	SearchMaxResults int
-	MaxImageBytes    int
-	SQLitePath       string
-	ReadinessNotice  bool
+	TelegramToken       string
+	AIBackend           string
+	GeminiAPIKey        string
+	OpenAIBaseURL       string
+	OpenAIAPIKey        string
+	GeminiModel         string
+	GoogleCloudProject  string
+	GoogleCloudLocation string
+	TavilyAPIKey        string
+	TriggerAlias        string
+	GeminiProxy         string
+	SystemPromptEnabled bool
+	SystemPrompt        string
+	SystemPromptFile    string
+	PollTimeoutSec      int
+	HistoryLimit        int
+	SearchMaxResults    int
+	MaxImageBytes       int
+	SQLitePath          string
+	ReadinessNotice     bool
 }
 
 type ChatMessage struct {
@@ -85,7 +91,7 @@ type SQLiteStore struct {
 
 type BotService struct {
 	bot        *tgbotapi.BotAPI
-	gemini     *genai.Client
+	llm        llm.Client
 	httpClient *http.Client
 	config     Config
 	memory     ChatStore
@@ -130,8 +136,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Fatalf("load .env: %v", err)
+	if err := loadEnvFile(); err != nil {
+		log.Fatalf("load env file: %v", err)
 	}
 
 	cfg, err := loadConfig()
@@ -145,25 +151,16 @@ func main() {
 	}
 	defer store.Close()
 
-	geminiHTTPClient, err := newGeminiHTTPClient(cfg.GeminiProxy)
+	resolvedModel, err := llm.ResolveModelName(ctx, llmConfig(cfg), cfg.GeminiModel, preferredModels)
 	if err != nil {
-		log.Fatalf("create gemini http client: %v", err)
-	}
-
-	geminiClient, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:     cfg.GeminiAPIKey,
-		Backend:    genai.BackendGeminiAPI,
-		HTTPClient: geminiHTTPClient,
-	})
-	if err != nil {
-		log.Fatalf("create gemini client: %v", err)
-	}
-
-	resolvedModel, err := resolveModelName(ctx, geminiClient, cfg.GeminiModel)
-	if err != nil {
-		log.Fatalf("resolve gemini model: %v", err)
+		log.Fatalf("resolve model: %v", err)
 	}
 	cfg.GeminiModel = resolvedModel
+
+	llmClient, err := llm.NewClient(ctx, llmConfig(cfg))
+	if err != nil {
+		log.Fatalf("create llm client: %v", err)
+	}
 
 	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
@@ -172,8 +169,8 @@ func main() {
 	defer bot.StopReceivingUpdates()
 
 	service := &BotService{
-		bot:    bot,
-		gemini: geminiClient,
+		bot: bot,
+		llm: llmClient,
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
 		},
@@ -183,7 +180,8 @@ func main() {
 	}
 
 	log.Printf("bot authorized as @%s", bot.Self.UserName)
-	log.Printf("gemini model: %s", cfg.GeminiModel)
+	log.Printf("ai backend: %s", cfg.AIBackend)
+	log.Printf("model: %s", cfg.GeminiModel)
 	if cfg.TriggerAlias != "" {
 		log.Printf("trigger alias: %s", cfg.TriggerAlias)
 	}
@@ -194,6 +192,9 @@ func main() {
 	}
 	if cfg.GeminiProxy != "" {
 		log.Printf("gemini proxy: enabled")
+	}
+	if cfg.AIBackend == "vertex-gemini" {
+		log.Printf("vertex project: %s, location: %s", cfg.GoogleCloudProject, cfg.GoogleCloudLocation)
 	}
 	log.Printf("sqlite: %s", cfg.SQLitePath)
 
@@ -225,17 +226,23 @@ func main() {
 
 func loadConfig() (Config, error) {
 	cfg := Config{
-		GeminiModel:      getEnv("GEMINI_MODEL", defaultModel),
-		TavilyAPIKey:     strings.TrimSpace(os.Getenv("TAVILY_API_KEY")),
-		TriggerAlias:     normalizeTriggerAlias(getEnv("TRIGGER_ALIAS", "@grok")),
-		GeminiProxy:      strings.TrimSpace(os.Getenv("GEMINI_PROXY")),
-		SystemPrompt:     getEnv("SYSTEM_PROMPT", defaultSystemPrompt),
-		SystemPromptFile: getEnv("SYSTEM_PROMPT_FILE", ""),
-		PollTimeoutSec:   getEnvAsInt("POLL_TIMEOUT_SECONDS", defaultPollTimeoutSec),
-		HistoryLimit:     getEnvAsInt("MAX_HISTORY_MESSAGES", defaultHistoryLimit),
-		SearchMaxResults: getEnvAsInt("SEARCH_MAX_RESULTS", defaultSearchResults),
-		MaxImageBytes:    getEnvAsInt("MAX_IMAGE_BYTES", defaultMaxImageBytes),
-		SQLitePath:       getEnv("SQLITE_PATH", "bot.db"),
+		AIBackend:           normalizeAIBackend(getEnv("AI_BACKEND", defaultAIBackend)),
+		GeminiModel:         getEnv("GEMINI_MODEL", defaultModel),
+		OpenAIBaseURL:       strings.TrimSpace(firstNonEmpty(os.Getenv("OPENAI_BASE_URL"), os.Getenv("VERTEX_OPENAI_BASE_URL"))),
+		OpenAIAPIKey:        strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		GoogleCloudProject:  strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT")),
+		GoogleCloudLocation: strings.TrimSpace(firstNonEmpty(os.Getenv("GOOGLE_CLOUD_LOCATION"), os.Getenv("GOOGLE_CLOUD_REGION"))),
+		TavilyAPIKey:        strings.TrimSpace(os.Getenv("TAVILY_API_KEY")),
+		TriggerAlias:        normalizeTriggerAlias(getEnv("TRIGGER_ALIAS", "@grok")),
+		GeminiProxy:         strings.TrimSpace(os.Getenv("GEMINI_PROXY")),
+		SystemPromptEnabled: getEnvAsBool("SYSTEM_PROMPT_ENABLED", true),
+		SystemPrompt:        getEnv("SYSTEM_PROMPT", defaultSystemPrompt),
+		SystemPromptFile:    getEnv("SYSTEM_PROMPT_FILE", ""),
+		PollTimeoutSec:      getEnvAsInt("POLL_TIMEOUT_SECONDS", defaultPollTimeoutSec),
+		HistoryLimit:        getEnvAsInt("MAX_HISTORY_MESSAGES", defaultHistoryLimit),
+		SearchMaxResults:    getEnvAsInt("SEARCH_MAX_RESULTS", defaultSearchResults),
+		MaxImageBytes:       getEnvAsInt("MAX_IMAGE_BYTES", defaultMaxImageBytes),
+		SQLitePath:          getEnv("SQLITE_PATH", "bot.db"),
 	}
 
 	cfg.TelegramToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
@@ -243,9 +250,36 @@ func loadConfig() (Config, error) {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
-	cfg.GeminiAPIKey = strings.TrimSpace(firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")))
-	if cfg.GeminiAPIKey == "" {
-		return Config{}, errors.New("GEMINI_API_KEY or GOOGLE_API_KEY is required")
+	switch cfg.AIBackend {
+	case "gemini":
+		cfg.GeminiAPIKey = strings.TrimSpace(firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")))
+		if cfg.GeminiAPIKey == "" {
+			return Config{}, errors.New("GEMINI_API_KEY or GOOGLE_API_KEY is required for AI_BACKEND=gemini")
+		}
+	case "vertex-gemini":
+		if cfg.GoogleCloudProject == "" {
+			return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required for AI_BACKEND=vertex-gemini")
+		}
+		if cfg.GoogleCloudLocation == "" {
+			return Config{}, errors.New("GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION is required for AI_BACKEND=vertex-gemini")
+		}
+	case "openai-compat", "vertex-grok":
+		if cfg.OpenAIBaseURL == "" {
+			if cfg.AIBackend == "vertex-grok" && cfg.GoogleCloudProject != "" {
+				cfg.OpenAIBaseURL = defaultVertexOpenAIBaseURL(cfg.GoogleCloudProject, cfg.GoogleCloudLocation)
+			}
+		}
+		if cfg.OpenAIBaseURL == "" {
+			if cfg.AIBackend == "openai-compat" {
+				return Config{}, errors.New("OPENAI_BASE_URL or VERTEX_OPENAI_BASE_URL is required for AI_BACKEND=openai-compat")
+			}
+			return Config{}, errors.New("OPENAI_BASE_URL, VERTEX_OPENAI_BASE_URL, or GOOGLE_CLOUD_PROJECT is required for AI_BACKEND=vertex-grok")
+		}
+		if cfg.AIBackend == "openai-compat" && cfg.OpenAIAPIKey == "" {
+			return Config{}, errors.New("OPENAI_API_KEY is required for AI_BACKEND=openai-compat")
+		}
+	default:
+		return Config{}, fmt.Errorf("unsupported AI_BACKEND %q (expected gemini, vertex, vertex-gemini, openai-compat, or vertex-grok)", cfg.AIBackend)
 	}
 
 	if cfg.HistoryLimit < 0 {
@@ -264,7 +298,7 @@ func loadConfig() (Config, error) {
 		cfg.MaxImageBytes = defaultMaxImageBytes
 	}
 
-	if cfg.SystemPromptFile != "" {
+	if cfg.SystemPromptEnabled && cfg.SystemPromptFile != "" {
 		promptFromFile, err := os.ReadFile(cfg.SystemPromptFile)
 		if err != nil {
 			return Config{}, fmt.Errorf("read SYSTEM_PROMPT_FILE: %w", err)
@@ -278,24 +312,12 @@ func loadConfig() (Config, error) {
 		cfg.SystemPrompt = trimmed
 	}
 
-	return cfg, nil
-}
-
-func newGeminiHTTPClient(proxyAddress string) (*http.Client, error) {
-	transport := &http.Transport{}
-
-	if strings.TrimSpace(proxyAddress) != "" {
-		proxyURL, err := url.Parse(strings.TrimSpace(proxyAddress))
-		if err != nil {
-			return nil, fmt.Errorf("parse GEMINI_PROXY: %w", err)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
+	if !cfg.SystemPromptEnabled {
+		cfg.SystemPrompt = ""
+		cfg.SystemPromptFile = ""
 	}
 
-	return &http.Client{
-		Timeout:   45 * time.Second,
-		Transport: transport,
-	}, nil
+	return cfg, nil
 }
 
 func (s *BotService) HandleMessage(ctx context.Context, message *tgbotapi.Message) error {
@@ -330,8 +352,8 @@ func (s *BotService) HandleMessage(ctx context.Context, message *tgbotapi.Messag
 		replyText, err = s.generateReply(ctx, history, buildUserInput(message, cleanText))
 	}
 	if err != nil {
-		log.Printf("gemini request failed: %v", err)
-		return s.reply(message.Chat.ID, userFacingGeminiError(err))
+		log.Printf("llm request failed: %v", err)
+		return s.reply(message.Chat.ID, userFacingLLMError(err))
 	}
 
 	if err := s.memory.Append(message.Chat.ID, ChatMessage{Role: "user", Text: buildHistoryEntry(message, cleanText)}); err != nil {
@@ -365,7 +387,7 @@ func (s *BotService) handleCommand(message *tgbotapi.Message) error {
 		if err := s.memory.Clear(message.Chat.ID); err != nil {
 			log.Printf("clear store: %v", err)
 		}
-		return s.reply(message.Chat.ID, "Привет. Я Telegram-бот на Gemini. Напиши сообщение — и я отвечу. Команда /reset очищает контекст.")
+		return s.reply(message.Chat.ID, "Привет. Я Telegram-бот с AI-моделью. Напиши сообщение — и я отвечу. Команда /reset очищает контекст.")
 	case "help":
 		return s.reply(message.Chat.ID, "Команды:\n/start — перезапуск\n/help — помощь\n/reset — очистить контекст\n/status — статус")
 	case "reset":
@@ -450,15 +472,19 @@ func (s *BotService) generateReplyToImage(ctx context.Context, message *tgbotapi
 	return s.generateReplyFromContents(ctx, contents)
 }
 
-func (s *BotService) generateReplyFromContents(ctx context.Context, contents []*genai.Content) (string, error) {
+func (s *BotService) generateReplyFromContents(ctx context.Context, contents []llm.Content) (string, error) {
 	var lastErr error
-	config := s.generationConfig()
+	tools := s.toolDeclarations()
 
 	for attempt := 1; attempt <= 3; attempt++ {
-		result, err := s.gemini.Models.GenerateContent(ctx, s.config.GeminiModel, contents, config)
+		result, err := s.llm.Generate(ctx, llm.Request{
+			Model:    s.config.GeminiModel,
+			Contents: contents,
+			Tools:    tools,
+		})
 		if err == nil {
-			if s.searchEnabled() {
-				toolReply, handled, toolErr := s.completeToolFlow(ctx, contents, result, config)
+			if len(result.FunctionCalls) > 0 {
+				toolReply, handled, toolErr := s.completeToolFlow(ctx, contents, result, tools)
 				if toolErr != nil {
 					lastErr = toolErr
 					break
@@ -468,9 +494,9 @@ func (s *BotService) generateReplyFromContents(ctx context.Context, contents []*
 				}
 			}
 
-			text := strings.TrimSpace(result.Text())
+			text := strings.TrimSpace(result.Text)
 			if text == "" {
-				return "", errors.New("empty response from Gemini")
+				return "", errors.New("empty response from model")
 			}
 			return truncateRunes(text, maxReplyRunes), nil
 		}
@@ -478,13 +504,13 @@ func (s *BotService) generateReplyFromContents(ctx context.Context, contents []*
 		lastErr = err
 
 		if isModelNotFoundError(err) {
-			fallbackModel, resolveErr := resolveModelName(ctx, s.gemini, "")
+			fallbackModel, resolveErr := llm.ResolveModelName(ctx, llmConfig(s.config), "", preferredModels)
 			if resolveErr != nil {
 				return "", err
 			}
 
 			if fallbackModel != "" && fallbackModel != s.config.GeminiModel {
-				log.Printf("switching gemini model from %s to %s", s.config.GeminiModel, fallbackModel)
+				log.Printf("switching model from %s to %s", s.config.GeminiModel, fallbackModel)
 				s.config.GeminiModel = fallbackModel
 				continue
 			}
@@ -719,43 +745,24 @@ func normalizeMealType(value string) string {
 	}
 }
 
-func (s *BotService) generationConfig() *genai.GenerateContentConfig {
-	config := &genai.GenerateContentConfig{}
-	tools := []*genai.Tool{cafeteriaMenuToolDeclaration()}
+func (s *BotService) toolDeclarations() []llm.Tool {
+	tools := []llm.Tool{cafeteriaMenuToolDeclaration()}
 	if s.searchEnabled() {
 		tools = append(tools, webSearchToolDeclaration())
 	}
-
-	if len(tools) == 0 {
-		return config
-	}
-
-	config.Tools = tools
-	config.ToolConfig = &genai.ToolConfig{
-		FunctionCallingConfig: &genai.FunctionCallingConfig{
-			Mode: genai.FunctionCallingConfigModeAuto,
-		},
-	}
-	return config
+	return tools
 }
 
-func (s *BotService) completeToolFlow(ctx context.Context, baseContents []*genai.Content, initial *genai.GenerateContentResponse, config *genai.GenerateContentConfig) (string, bool, error) {
-	functionCalls := initial.FunctionCalls()
-	if len(functionCalls) == 0 {
+func (s *BotService) completeToolFlow(ctx context.Context, baseContents []llm.Content, initial llm.Response, tools []llm.Tool) (string, bool, error) {
+	if len(initial.FunctionCalls) == 0 {
 		return "", false, nil
 	}
 
-	contents := append([]*genai.Content{}, baseContents...)
-	if candidateContent := firstCandidateContent(initial); candidateContent != nil {
-		contents = append(contents, candidateContent)
-	}
+	contents := append([]llm.Content{}, baseContents...)
+	contents = append(contents, initial.ConversationDelta...)
 
 	handledAny := false
-	for _, functionCall := range functionCalls {
-		if functionCall == nil {
-			continue
-		}
-
+	for _, functionCall := range initial.FunctionCalls {
 		toolResponse, handled, err := s.executeTool(ctx, functionCall)
 		if err != nil {
 			return "", false, err
@@ -765,27 +772,40 @@ func (s *BotService) completeToolFlow(ctx context.Context, baseContents []*genai
 		}
 
 		handledAny = true
-		contents = append(contents, genai.NewContentFromFunctionResponse(functionCall.Name, toolResponse, genai.RoleUser))
+		contents = append(contents, llm.Content{
+			Role: "user",
+			Parts: []llm.Part{{
+				FunctionResponse: &llm.FunctionResponse{
+					ID:       functionCall.ID,
+					Name:     functionCall.Name,
+					Response: toolResponse,
+				},
+			}},
+		})
 	}
 
 	if !handledAny {
 		return "", false, nil
 	}
 
-	finalResult, err := s.gemini.Models.GenerateContent(ctx, s.config.GeminiModel, contents, config)
+	finalResult, err := s.llm.Generate(ctx, llm.Request{
+		Model:    s.config.GeminiModel,
+		Contents: contents,
+		Tools:    tools,
+	})
 	if err != nil {
 		return "", false, err
 	}
 
-	text := strings.TrimSpace(finalResult.Text())
+	text := strings.TrimSpace(finalResult.Text)
 	if text == "" {
-		return "", false, errors.New("empty response from Gemini after tool call")
+		return "", false, errors.New("empty response from model after tool call")
 	}
 
 	return text, true, nil
 }
 
-func (s *BotService) executeTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
+func (s *BotService) executeTool(ctx context.Context, functionCall llm.FunctionCall) (map[string]any, bool, error) {
 	switch functionCall.Name {
 	case "web_search":
 		return s.executeWebSearchTool(ctx, functionCall)
@@ -796,7 +816,7 @@ func (s *BotService) executeTool(ctx context.Context, functionCall *genai.Functi
 	}
 }
 
-func (s *BotService) executeWebSearchTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
+func (s *BotService) executeWebSearchTool(ctx context.Context, functionCall llm.FunctionCall) (map[string]any, bool, error) {
 	if !s.searchEnabled() {
 		return map[string]any{"ok": false, "error": "web search is disabled"}, true, nil
 	}
@@ -839,7 +859,7 @@ func (s *BotService) executeWebSearchTool(ctx context.Context, functionCall *gen
 	return response, true, nil
 }
 
-func (s *BotService) executeCafeteriaMenuTool(ctx context.Context, functionCall *genai.FunctionCall) (map[string]any, bool, error) {
+func (s *BotService) executeCafeteriaMenuTool(ctx context.Context, functionCall llm.FunctionCall) (map[string]any, bool, error) {
 	dateValue, _ := functionCall.Args["date"].(string)
 	mealTypeValue, _ := functionCall.Args["meal_type"].(string)
 
@@ -969,57 +989,41 @@ func (s *BotService) searchEnabled() bool {
 	return strings.TrimSpace(s.config.TavilyAPIKey) != ""
 }
 
-func webSearchToolDeclaration() *genai.Tool {
-	return &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{
-			{
-				Name:        "web_search",
-				Description: "Search the web for fresh or external information when the answer depends on current events, recent facts, online sources, or data outside the model's memory.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"query": {
-							Type:        genai.TypeString,
-							Description: "The search query in the user's language. Make it specific enough to retrieve relevant current information.",
-						},
-					},
-					Required: []string{"query"},
+func webSearchToolDeclaration() llm.Tool {
+	return llm.Tool{
+		Name:        "web_search",
+		Description: "Search the web for fresh or external information when the answer depends on current events, recent facts, online sources, or data outside the model's memory.",
+		Parameters: &llm.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*llm.Schema{
+				"query": {
+					Type:        "STRING",
+					Description: "The search query in the user's language. Make it specific enough to retrieve relevant current information.",
 				},
 			},
+			Required: []string{"query"},
 		},
 	}
 }
 
-func cafeteriaMenuToolDeclaration() *genai.Tool {
-	return &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{
-			{
-				Name:        "get_cafeteria_menu",
-				Description: "Get today's or a specific day's cafeteria menu from Arambyeol cafeteria API. Use this when the user asks what is served in the cafeteria for breakfast, lunch, or dinner.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"date": {
-							Type:        genai.TypeString,
-							Description: "Optional date in YYYY-MM-DD format. If omitted, use today's date.",
-						},
-						"meal_type": {
-							Type:        genai.TypeString,
-							Description: "Optional meal type: BREAKFAST, LUNCH, or DINNER. If omitted, default to LUNCH.",
-						},
-					},
+func cafeteriaMenuToolDeclaration() llm.Tool {
+	return llm.Tool{
+		Name:        "get_cafeteria_menu",
+		Description: "Get today's or a specific day's cafeteria menu from Arambyeol cafeteria API. Use this when the user asks what is served in the cafeteria for breakfast, lunch, or dinner.",
+		Parameters: &llm.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*llm.Schema{
+				"date": {
+					Type:        "STRING",
+					Description: "Optional date in YYYY-MM-DD format. If omitted, use today's date.",
+				},
+				"meal_type": {
+					Type:        "STRING",
+					Description: "Optional meal type: BREAKFAST, LUNCH, or DINNER. If omitted, default to LUNCH.",
 				},
 			},
 		},
 	}
-}
-
-func firstCandidateContent(response *genai.GenerateContentResponse) *genai.Content {
-	if response == nil || len(response.Candidates) == 0 {
-		return nil
-	}
-
-	return response.Candidates[0].Content
 }
 
 func buildUserInput(message *tgbotapi.Message, userText string) string {
@@ -1105,25 +1109,29 @@ func displayName(user *tgbotapi.User) string {
 	return "user"
 }
 
-func userFacingGeminiError(err error) string {
+func userFacingLLMError(err error) string {
 	message := err.Error()
 	if strings.Contains(message, "image is too large") {
 		return "Картинка слишком большая для обработки. Отправь более легкое изображение или сожми файл."
 	}
 
+	if strings.Contains(strings.ToLower(message), "openai-compatible adapter does not support image") {
+		return "Для этого backend изображения пока не поддерживаются. Переключись на Gemini backend или отправь текстовый запрос."
+	}
+
 	if isQuotaError(err) {
 		if retryDelay := extractRetryDelay(err); retryDelay > 0 {
-			return fmt.Sprintf("Лимит Gemini сейчас исчерпан. Попробуй снова примерно через %s.", retryDelay.Round(time.Second))
+			return fmt.Sprintf("Лимит модели сейчас исчерпан. Попробуй снова примерно через %s.", retryDelay.Round(time.Second))
 		}
 
-		return "Лимит Gemini для этого проекта сейчас исчерпан или недоступен. Попробуй позже или смени модель/API key."
+		return "Лимит модели для этого проекта сейчас исчерпан или недоступен. Попробуй позже или смени модель/ключ доступа."
 	}
 
 	if isModelNotFoundError(err) {
-		return "У текущего API key недоступна выбранная модель Gemini. Я попробовал подобрать доступную, но не смог. Проверь доступные модели или другой API key."
+		return "У текущих credentials недоступна выбранная модель. Я попробовал подобрать доступную, но не смог. Проверь имя модели и доступы."
 	}
 
-	return "Не смог получить ответ от Gemini. Попробуй ещё раз через пару секунд."
+	return "Не смог получить ответ от модели. Попробуй ещё раз через пару секунд."
 }
 
 func isQuotaError(err error) bool {
@@ -1292,26 +1300,26 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-func buildContents(systemPrompt string, history []ChatMessage, userText string) []*genai.Content {
-	contents := make([]*genai.Content, 0, len(history)+2)
+func buildContents(systemPrompt string, history []ChatMessage, userText string) []llm.Content {
+	contents := make([]llm.Content, 0, len(history)+2)
 
 	if systemPrompt != "" {
-		contents = append(contents, genai.NewContentFromText(systemPrompt, genai.RoleUser))
+		contents = append(contents, llm.Content{Role: "user", Parts: []llm.Part{{Text: systemPrompt}}})
 	}
 
-	contents = append(contents, genai.NewContentFromText(currentDateContext(), genai.RoleUser))
+	contents = append(contents, llm.Content{Role: "user", Parts: []llm.Part{{Text: currentDateContext()}}})
 
 	for _, message := range history {
-		var role genai.Role = genai.RoleUser
+		role := "user"
 		if message.Role == "assistant" {
-			role = genai.RoleModel
+			role = "assistant"
 		}
 
-		contents = append(contents, genai.NewContentFromText(message.Text, role))
+		contents = append(contents, llm.Content{Role: role, Parts: []llm.Part{{Text: message.Text}}})
 	}
 
 	if strings.TrimSpace(userText) != "" {
-		contents = append(contents, genai.NewContentFromText(userText, genai.RoleUser))
+		contents = append(contents, llm.Content{Role: "user", Parts: []llm.Part{{Text: userText}}})
 	}
 
 	return contents
@@ -1355,18 +1363,18 @@ func mustLoadLocation(name string) *time.Location {
 	return location
 }
 
-func buildContentsWithPhoto(systemPrompt string, history []ChatMessage, userText string, imageBytes []byte, mimeType string) []*genai.Content {
+func buildContentsWithPhoto(systemPrompt string, history []ChatMessage, userText string, imageBytes []byte, mimeType string) []llm.Content {
 	contents := buildContents(systemPrompt, history, "")
-	parts := make([]*genai.Part, 0, 2)
+	parts := make([]llm.Part, 0, 2)
 
 	if strings.TrimSpace(userText) != "" {
-		parts = append(parts, genai.NewPartFromText(userText))
+		parts = append(parts, llm.Part{Text: userText})
 	} else {
-		parts = append(parts, genai.NewPartFromText("Опиши, что на изображении, и ответь по существу."))
+		parts = append(parts, llm.Part{Text: "Опиши, что на изображении, и ответь по существу."})
 	}
 
-	parts = append(parts, genai.NewPartFromBytes(imageBytes, mimeType))
-	contents = append(contents, genai.NewContentFromParts(parts, genai.RoleUser))
+	parts = append(parts, llm.Part{Data: imageBytes, MimeType: mimeType})
+	contents = append(contents, llm.Content{Role: "user", Parts: parts})
 	return contents
 }
 
@@ -1403,6 +1411,22 @@ func getEnvAsInt(key string, fallback int) int {
 	}
 
 	return parsed
+}
+
+func getEnvAsBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -1451,96 +1475,67 @@ func replaceCaseInsensitive(source, oldValue, newValue string) string {
 	return builder.String()
 }
 
-func resolveModelName(ctx context.Context, client *genai.Client, requested string) (string, error) {
-	availableModels, err := listGenerateContentModels(ctx, client)
-	if err != nil {
-		return "", err
+func llmConfig(cfg Config) llm.Config {
+	return llm.Config{
+		Backend:  cfg.AIBackend,
+		Model:    cfg.GeminiModel,
+		APIKey:   cfg.GeminiAPIKey,
+		BaseURL:  cfg.OpenAIBaseURL,
+		Token:    cfg.OpenAIAPIKey,
+		Project:  cfg.GoogleCloudProject,
+		Location: cfg.GoogleCloudLocation,
+		Proxy:    cfg.GeminiProxy,
 	}
-
-	if len(availableModels) == 0 {
-		return "", errors.New("no generateContent models available for this API key")
-	}
-
-	if requested != "" {
-		if resolved := findMatchingModel(requested, availableModels); resolved != "" {
-			return resolved, nil
-		}
-	}
-
-	for _, candidate := range preferredModels {
-		if resolved := findMatchingModel(candidate, availableModels); resolved != "" {
-			return resolved, nil
-		}
-	}
-
-	return availableModels[0], nil
 }
 
-func listGenerateContentModels(ctx context.Context, client *genai.Client) ([]string, error) {
-	modelSet := make(map[string]struct{})
-
-	for model, err := range client.Models.All(ctx) {
-		if err != nil {
-			return nil, err
-		}
-
-		if model == nil || model.Name == "" {
-			continue
-		}
-
-		if !supportsGenerateContent(model.SupportedActions) {
-			continue
-		}
-
-		name := strings.TrimSpace(strings.TrimPrefix(model.Name, "models/"))
-		if name == "" {
-			continue
-		}
-
-		modelSet[name] = struct{}{}
+func normalizeAIBackend(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "gemini":
+		return "gemini"
+	case "vertex", "vertex-gemini":
+		return "vertex-gemini"
+	case "openai-compat", "vertex-grok":
+		return value
+	default:
+		return value
 	}
-
-	models := make([]string, 0, len(modelSet))
-	for name := range modelSet {
-		models = append(models, name)
-	}
-
-	slices.Sort(models)
-	return models, nil
 }
 
-func supportsGenerateContent(actions []string) bool {
-	for _, action := range actions {
-		if strings.EqualFold(action, "generateContent") {
-			return true
-		}
+func loadEnvFile() error {
+	envFile := strings.TrimSpace(os.Getenv("ENV_FILE"))
+	if envFile == "" {
+		envFile = ".env"
 	}
-	return false
+
+	if envFile == ".env" {
+		if err := godotenv.Load(envFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s: %w", envFile, err)
+		}
+		return nil
+	}
+
+	if err := godotenv.Load(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf(".env: %w", err)
+	}
+
+	if err := godotenv.Overload(envFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s: %w", envFile, err)
+	}
+
+	return nil
 }
 
-func findMatchingModel(requested string, available []string) string {
-	requested = strings.TrimSpace(strings.TrimPrefix(requested, "models/"))
-	if requested == "" {
+func defaultVertexOpenAIBaseURL(project, location string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
 		return ""
 	}
 
-	for _, name := range available {
-		if name == requested {
-			return name
-		}
+	location = strings.TrimSpace(location)
+	if location == "" {
+		location = "global"
 	}
 
-	for _, name := range available {
-		if strings.HasPrefix(name, requested) {
-			return name
-		}
-	}
-
-	for _, name := range available {
-		if strings.Contains(name, requested) {
-			return name
-		}
-	}
-
-	return ""
+	return fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", project, location)
 }
