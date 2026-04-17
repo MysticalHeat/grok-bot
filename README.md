@@ -135,18 +135,22 @@ mkdir -p bin
 go build -o bin/telegram-gemini-bot .
 ```
 
-## Запуск на VPS через systemd
+## Деплой на HomeVpn / systemd
 
 1. Собери бинарник.
-2. Положи `.env` рядом с бинарником или пропиши `Environment=` в unit.
-3. Скопируй unit из `deploy/telegram-gemini-bot.service` в `/etc/systemd/system/`.
+2. Скопируй бинарник в `/opt/telegram-gemini-bot/`.
+3. Скопируй `deploy/telegram-gemini-bot-homevpn.env.example` как `.env` и заполни значения.
+4. Скопируй service-account JSON в `/etc/telegram-gemini-bot/service-account.json`.
+5. Скопируй unit из `deploy/telegram-gemini-bot-homevpn.service` в `/etc/systemd/system/`.
+6. Убедись, что `GOOGLE_APPLICATION_CREDENTIALS` указывает на JSON — это и есть ADC для сервера.
+7. Имей в виду: `vertex-grok` в этом приложении поддерживает только текст.
 
 Команды:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable telegram-gemini-bot
-sudo systemctl start telegram-gemini-bot
+sudo systemctl restart telegram-gemini-bot
 sudo systemctl status telegram-gemini-bot
 ```
 

@@ -9,6 +9,7 @@ WorkingDirectory=/opt/telegram-gemini-bot
 ExecStart=/opt/telegram-gemini-bot/telegram-gemini-bot
 EnvironmentFile=/opt/telegram-gemini-bot/.env
 Environment=SQLITE_PATH=/var/lib/telegram-gemini-bot/bot.db
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/telegram-gemini-bot/service-account.json
 Restart=always
 RestartSec=5
 User=telegrambot
