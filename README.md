@@ -154,6 +154,40 @@ sudo systemctl restart telegram-gemini-bot
 sudo systemctl status telegram-gemini-bot
 ```
 
+### SSH deploy script
+
+Есть helper-скрипт для полного деплоя по SSH:
+
+```bash
+chmod +x deploy/deploy.sh
+deploy/deploy.sh --host your-server --env-file .env
+```
+
+Пример для HomeVpn / Vertex Grok:
+
+```bash
+deploy/deploy.sh \
+  --host your-server \
+  --env-file .env.homevpn \
+  --service-file deploy/telegram-gemini-bot-homevpn.service \
+  --credentials-file ~/service-account.json
+```
+
+Что делает скрипт:
+
+- локально собирает Linux-бинарник `bin/telegram-gemini-bot`
+- копирует бинарник, `.env` и `systemd` unit на сервер по SSH/SCP
+- создаёт пользователя `telegrambot`, если его ещё нет
+- обновляет файлы в `/opt/telegram-gemini-bot`
+- при необходимости загружает service-account JSON в `/etc/telegram-gemini-bot/service-account.json`
+- делает `systemctl daemon-reload`, `enable`, `restart`, `status`
+
+Справка:
+
+```bash
+deploy/deploy.sh --help
+```
+
 ## Примечания
 
 - История чатов хранится в SQLite и сохраняется после рестарта.

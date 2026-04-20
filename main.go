@@ -762,6 +762,7 @@ func (s *BotService) completeToolFlow(ctx context.Context, baseContents []llm.Co
 	contents = append(contents, initial.ConversationDelta...)
 
 	handledAny := false
+	needsCafeteriaTranslationHint := false
 	for _, functionCall := range initial.FunctionCalls {
 		toolResponse, handled, err := s.executeTool(ctx, functionCall)
 		if err != nil {
@@ -782,10 +783,23 @@ func (s *BotService) completeToolFlow(ctx context.Context, baseContents []llm.Co
 				},
 			}},
 		})
+
+		if functionCall.Name == "get_cafeteria_menu" {
+			needsCafeteriaTranslationHint = true
+		}
 	}
 
 	if !handledAny {
 		return "", false, nil
+	}
+
+	if needsCafeteriaTranslationHint {
+		contents = append(contents, llm.Content{
+			Role: "user",
+			Parts: []llm.Part{{
+				Text: "Если в меню есть корейские названия блюд, после каждого такого названия обязательно добавляй русский перевод или краткое пояснение в скобках. Если точный перевод неочевиден, дай короткое понятное объяснение блюда на русском.",
+			}},
+		})
 	}
 
 	finalResult, err := s.llm.Generate(ctx, llm.Request{
@@ -1009,7 +1023,7 @@ func webSearchToolDeclaration() llm.Tool {
 func cafeteriaMenuToolDeclaration() llm.Tool {
 	return llm.Tool{
 		Name:        "get_cafeteria_menu",
-		Description: "Get today's or a specific day's cafeteria menu from Arambyeol cafeteria API. Use this when the user asks what is served in the cafeteria for breakfast, lunch, or dinner.",
+		Description: "Get today's or a specific day's cafeteria menu from Arambyeol cafeteria API. Use this when the user asks what is served in the cafeteria for breakfast, lunch, or dinner. If menu items contain Korean names, always provide a Russian translation or short explanation after each such name in the final answer.",
 		Parameters: &llm.Schema{
 			Type: "OBJECT",
 			Properties: map[string]*llm.Schema{
