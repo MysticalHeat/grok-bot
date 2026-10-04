@@ -1,0 +1,44 @@
+name: deploy-env
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: deploy-nomlivps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy env only
+        env:
+          SSH_HOST: root@195.123.209.108
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          ENV_CONTENT: ${{ secrets.DEPLOY_ENV_FILE }}
+        run: |
+          if [ -z "$ENV_CONTENT" ]; then
+            echo "::error::DEPLOY_ENV_FILE secret is not set"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_ed25519
+          chmod 600 ~/.ssh/deploy_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s' "$ENV_CONTENT" > /tmp/grok-bot.env
+
+          ssh -o BatchMode=yes "$SSH_HOST" 'mkdir -p /tmp/grok-bot-env'
+          scp -o BatchMode=yes /tmp/grok-bot.env "$SSH_HOST:/tmp/grok-bot-env/.env"
+          ssh -o BatchMode=yes "$SSH_HOST" '
+            set -euo pipefail
+            install -o telegrambot -g telegrambot -m 640 /tmp/grok-bot-env/.env /opt/telegram-gemini-bot/.env
+            rm -rf /tmp/grok-bot-env
+            systemctl restart telegram-gemini-bot
+            sleep 2
+            systemctl is-active telegram-gemini-bot
+          '
