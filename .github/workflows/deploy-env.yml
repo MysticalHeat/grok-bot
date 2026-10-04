@@ -32,9 +32,9 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s' "$ENV_CONTENT" > /tmp/grok-bot.env
 
-          ssh -o BatchMode=yes "$SSH_HOST" 'mkdir -p /tmp/grok-bot-env'
-          scp -o BatchMode=yes /tmp/grok-bot.env "$SSH_HOST:/tmp/grok-bot-env/.env"
-          ssh -o BatchMode=yes "$SSH_HOST" '
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_ed25519 "$SSH_HOST" 'mkdir -p /tmp/grok-bot-env'
+          scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_ed25519 /tmp/grok-bot.env "$SSH_HOST:/tmp/grok-bot-env/.env"
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_ed25519 "$SSH_HOST" '
             set -euo pipefail
             install -o telegrambot -g telegrambot -m 640 /tmp/grok-bot-env/.env /opt/telegram-gemini-bot/.env
             rm -rf /tmp/grok-bot-env
