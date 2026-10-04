@@ -1,0 +1,53 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-nomlivps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build -o bin/telegram-gemini-bot .
+
+      - name: Prepare env and credentials
+        run: |
+          mkdir -p /tmp/grok-bot
+          printf '%s' "${{ secrets.DEPLOY_ENV_FILE }}" > /tmp/grok-bot/.env
+          if [ -n "${{ secrets.DEPLOY_SERVICE_ACCOUNT_JSON }}" ]; then
+            printf '%s' "${{ secrets.DEPLOY_SERVICE_ACCOUNT_JSON }}" > /tmp/grok-bot/service-account.json
+          fi
+
+      - name: Deploy to NomliVPS
+        env:
+          SSH_HOST: root@195.123.209.108
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_ed25519
+          chmod 600 ~/.ssh/deploy_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ARGS=(--host "$SSH_HOST" --port 22 --identity ~/.ssh/deploy_ed25519 --env-file /tmp/grok-bot/.env)
+          if [ -f /tmp/grok-bot/service-account.json ]; then
+            ARGS+=(--credentials-file /tmp/grok-bot/service-account.json)
+          fi
+          deploy/deploy.sh "${ARGS[@]}"

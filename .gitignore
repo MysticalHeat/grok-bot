@@ -1,6 +1,7 @@
 .env
 .env.*.local
-.env.homevpn
+.env.*
+!.env.example
 bin/
 telegram-gemini-bot
 *.log
