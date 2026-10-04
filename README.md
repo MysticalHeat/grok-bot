@@ -59,6 +59,8 @@ ENV_FILE=.env.vertex-grok.local go run .
 - `OPENAI_BASE_URL` — base URL для OpenAI-compatible chat completions API
 - `OPENAI_API_KEY` — bearer token / API key для OpenAI-compatible backend
 - `VERTEX_OPENAI_BASE_URL` — удобный alias для `OPENAI_BASE_URL` при Vertex OpenAI-compatible доступе
+- `ALLOWED_USER_IDS` — список Telegram user ID через запятую, которым разрешено общение с ботом в личке; пусто — разрешено всем
+- `ALLOWED_GROUP_IDS` — список Telegram chat ID групп/супергрупп через запятую, где боту разрешено отвечать; пусто — разрешено везде; сообщения из неразрешённых чатов игнорируются молча
 
 ### Режим Gemini
 

@@ -69,6 +69,8 @@ type Config struct {
 	MaxImageBytes       int
 	SQLitePath          string
 	ReadinessNotice     bool
+	AllowedUserIDs      []int64
+	AllowedGroupIDs     []int64
 }
 
 type ChatMessage struct {
@@ -243,6 +245,8 @@ func loadConfig() (Config, error) {
 		SearchMaxResults:    getEnvAsInt("SEARCH_MAX_RESULTS", defaultSearchResults),
 		MaxImageBytes:       getEnvAsInt("MAX_IMAGE_BYTES", defaultMaxImageBytes),
 		SQLitePath:          getEnv("SQLITE_PATH", "bot.db"),
+		AllowedUserIDs:      getEnvAsInt64List("ALLOWED_USER_IDS"),
+		AllowedGroupIDs:     getEnvAsInt64List("ALLOWED_GROUP_IDS"),
 	}
 
 	cfg.TelegramToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
@@ -321,6 +325,11 @@ func loadConfig() (Config, error) {
 }
 
 func (s *BotService) HandleMessage(ctx context.Context, message *tgbotapi.Message) error {
+	if !s.isAllowedChat(message) {
+		log.Printf("ignore message from restricted chat %d (%s)", message.Chat.ID, message.Chat.Type)
+		return nil
+	}
+
 	text := strings.TrimSpace(extractMessageText(message))
 	imageSource, hasImage := s.resolveImageSource(message)
 	cleanText := s.cleanIncomingText(text)
@@ -401,6 +410,41 @@ func (s *BotService) handleCommand(message *tgbotapi.Message) error {
 	default:
 		return s.reply(message.Chat.ID, "Неизвестная команда. Используй /help.")
 	}
+}
+
+// isAllowedChat checks access: private chats are matched against ALLOWED_USER_IDS
+// (sender ID), group/supergroup chats against ALLOWED_GROUP_IDS (chat ID). An
+// empty list means the corresponding chat type is allowed for everyone to
+// preserve backward compatibility.
+func (s *BotService) isAllowedChat(message *tgbotapi.Message) bool {
+	if message == nil || message.Chat == nil {
+		return false
+	}
+
+	if message.Chat.IsPrivate() {
+		if len(s.config.AllowedUserIDs) == 0 {
+			return true
+		}
+		return message.From != nil && containsID(s.config.AllowedUserIDs, message.From.ID)
+	}
+
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return false
+	}
+
+	if len(s.config.AllowedGroupIDs) == 0 {
+		return true
+	}
+	return containsID(s.config.AllowedGroupIDs, message.Chat.ID)
+}
+
+func containsID(ids []int64, id int64) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *BotService) shouldRespond(message *tgbotapi.Message) bool {
@@ -1425,6 +1469,31 @@ func getEnvAsInt(key string, fallback int) int {
 	}
 
 	return parsed
+}
+
+func getEnvAsInt64List(key string) []int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	ids := make([]int64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			log.Printf("skip invalid %s entry %q: %v", key, part, err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+
+	return ids
 }
 
 func getEnvAsBool(key string, fallback bool) bool {
