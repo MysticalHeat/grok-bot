@@ -1,20 +1,14 @@
 package llm
 
 type Config struct {
-	Backend  string
-	Model    string
-	APIKey   string
-	BaseURL  string
-	Token    string
-	Project  string
-	Location string
-	Proxy    string
+	APIKey string
 }
 
 type Request struct {
-	Model    string
-	Contents []Content
-	Tools    []Tool
+	Model          string
+	Contents       []Content
+	Tools          []Tool
+	ResponseSchema *Schema
 }
 
 type Response struct {
@@ -47,6 +41,7 @@ type Schema struct {
 	Description string
 	Properties  map[string]*Schema
 	Required    []string
+	Items       *Schema
 }
 
 type FunctionCall struct {

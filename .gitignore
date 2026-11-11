@@ -6,3 +6,5 @@ bin/
 telegram-gemini-bot
 *.log
 *.db
+*.db-shm
+*.db-wal

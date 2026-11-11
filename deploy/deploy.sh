@@ -168,6 +168,7 @@ trap cleanup EXIT
 cp "$BINARY_PATH" "$LOCAL_TMP/$SERVICE_NAME"
 cp "$ENV_FILE" "$LOCAL_TMP/.env"
 cp "$SERVICE_FILE" "$LOCAL_TMP/${SERVICE_NAME}.service"
+cp -R "$REPO_ROOT/prompts" "$LOCAL_TMP/prompts"
 if [[ -n "$CREDENTIALS_FILE" ]]; then
 	cp "$CREDENTIALS_FILE" "$LOCAL_TMP/service-account.json"
 fi
@@ -178,6 +179,7 @@ log "Checking SSH connectivity"
 log "Uploading release bundle to $SSH_TARGET"
 	ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "mkdir -p '$REMOTE_TMP'"
 	scp "${SCP_OPTS[@]}" "$LOCAL_TMP/$SERVICE_NAME" "$LOCAL_TMP/.env" "$LOCAL_TMP/${SERVICE_NAME}.service" "$SSH_TARGET:$REMOTE_TMP/"
+	scp "${SCP_OPTS[@]}" -r "$LOCAL_TMP/prompts" "$SSH_TARGET:$REMOTE_TMP/"
 if [[ -n "$CREDENTIALS_FILE" ]]; then
 	scp "${SCP_OPTS[@]}" "$LOCAL_TMP/service-account.json" "$SSH_TARGET:$REMOTE_TMP/"
 fi
@@ -223,6 +225,8 @@ sudo install -d -o root -g root -m 755 /etc/systemd/system
 sudo install -o "$APP_USER" -g "$APP_GROUP" -m 755 "$REMOTE_TMP/$SERVICE_NAME" "$APP_DIR/$SERVICE_NAME"
 sudo install -o "$APP_USER" -g "$APP_GROUP" -m 640 "$REMOTE_TMP/.env" "$APP_DIR/.env"
 sudo install -o root -g root -m 644 "$REMOTE_TMP/${SERVICE_NAME}.service" "$SERVICE_UNIT_PATH"
+sudo install -d -o "$APP_USER" -g "$APP_GROUP" -m 755 "$APP_DIR/prompts"
+sudo install -o "$APP_USER" -g "$APP_GROUP" -m 644 "$REMOTE_TMP"/prompts/*.txt "$APP_DIR/prompts/"
 
 if [[ "$UPLOAD_CREDENTIALS" == "true" ]]; then
 	REMOTE_CREDENTIALS_DIR="$(dirname "$REMOTE_CREDENTIALS_PATH")"

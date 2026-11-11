@@ -1,9 +1,8 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,6 +19,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Test
+        run: go test ./...
 
       - name: Vet
         run: go vet ./...

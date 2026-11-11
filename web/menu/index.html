@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Меню столовой</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">СТОЛОВАЯ</p><h1>Меню</h1></header>
+    <nav class="date-nav" aria-label="Выбор даты">
+      <button id="previous" aria-label="Предыдущий день">←</button>
+      <div><strong id="date">Загрузка…</strong><button id="today" class="today">Сегодня</button></div>
+      <button id="next" aria-label="Следующий день">→</button>
+    </nav>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <div id="meals"></div>
+  </main>
+  <dialog id="dish-dialog" aria-labelledby="dish-dialog-title">
+    <button id="dish-close" class="dialog-close" type="button" aria-label="Закрыть карточку">×</button>
+    <div id="dish-dialog-content"></div>
+  </dialog>
+</body>
+</html>

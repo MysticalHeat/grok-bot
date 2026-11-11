@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,14 +22,13 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
-	"google.golang.org/genai"
 	_ "modernc.org/sqlite"
 	"telegram-gemini-bot/internal/llm"
 )
 
 const (
-	defaultModel          = "gemini-3.1-flash-lite-preview"
-	defaultAIBackend      = "gemini"
+	defaultModel          = "x-ai/grok-4.3"
+	defaultAIBackend      = "openrouter"
 	defaultPollTimeoutSec = 30
 	defaultHistoryLimit   = 12
 	defaultSystemPrompt   = "Отвечай кратко и по делу на русском языке, если пользователь не просит иначе."
@@ -39,27 +39,13 @@ const (
 
 var seoulLocation = mustLoadLocation("Asia/Seoul")
 
-var preferredModels = []string{
-	"gemini-3.1-flash-lite-preview",
-	"gemini-3.1-flash-lite",
-	"gemini-2.5-flash",
-	"gemini-2.0-flash-001",
-	"gemini-2.0-flash",
-	"gemini-1.5-flash",
-}
-
 type Config struct {
 	TelegramToken       string
 	AIBackend           string
-	GeminiAPIKey        string
-	OpenAIBaseURL       string
 	OpenAIAPIKey        string
 	GeminiModel         string
-	GoogleCloudProject  string
-	GoogleCloudLocation string
 	TavilyAPIKey        string
 	TriggerAlias        string
-	GeminiProxy         string
 	SystemPromptEnabled bool
 	SystemPrompt        string
 	SystemPromptFile    string
@@ -71,6 +57,11 @@ type Config struct {
 	ReadinessNotice     bool
 	AllowedUserIDs      []int64
 	AllowedGroupIDs     []int64
+	CafeteriaEnabled    bool
+	CafeteriaModel      string
+	CafeteriaInterval   int
+	CafeteriaDaysAhead  int
+	MenuListenAddr      string
 }
 
 type ChatMessage struct {
@@ -98,6 +89,7 @@ type BotService struct {
 	config     Config
 	memory     ChatStore
 	started    time.Time
+	cafeteria  *cafeteriaPreparer
 }
 
 type TavilySearchRequest struct {
@@ -153,12 +145,6 @@ func main() {
 	}
 	defer store.Close()
 
-	resolvedModel, err := llm.ResolveModelName(ctx, llmConfig(cfg), cfg.GeminiModel, preferredModels)
-	if err != nil {
-		log.Fatalf("resolve model: %v", err)
-	}
-	cfg.GeminiModel = resolvedModel
-
 	llmClient, err := llm.NewClient(ctx, llmConfig(cfg))
 	if err != nil {
 		log.Fatalf("create llm client: %v", err)
@@ -180,6 +166,39 @@ func main() {
 		memory:  store,
 		started: time.Now(),
 	}
+	if cfg.MenuListenAddr != "" {
+		listener, err := net.Listen("tcp", cfg.MenuListenAddr)
+		if err != nil {
+			log.Fatalf("menu listener: %v", err)
+		}
+		server := &http.Server{Handler: newMenuHandler(store, cfg.TelegramToken), ReadHeaderTimeout: 10 * time.Second}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("menu server: %v", err)
+				stop()
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				_ = server.Close()
+			}
+			<-done
+		}()
+		log.Printf("menu server listening on %s", cfg.MenuListenAddr)
+	}
+
+	if cfg.CafeteriaEnabled {
+		prepCtx, cancel := context.WithCancel(ctx)
+		preparer := newCafeteriaPreparer(store, service.httpClient, cfg)
+		service.cafeteria = preparer
+		done := make(chan struct{})
+		go func() { defer close(done); preparer.run(prepCtx) }()
+		defer func() { cancel(); <-done }()
+	}
 
 	log.Printf("bot authorized as @%s", bot.Self.UserName)
 	log.Printf("ai backend: %s", cfg.AIBackend)
@@ -191,12 +210,6 @@ func main() {
 		log.Printf("web search: enabled (Tavily)")
 	} else {
 		log.Printf("web search: disabled")
-	}
-	if cfg.GeminiProxy != "" {
-		log.Printf("gemini proxy: enabled")
-	}
-	if cfg.AIBackend == "vertex-gemini" {
-		log.Printf("vertex project: %s, location: %s", cfg.GoogleCloudProject, cfg.GoogleCloudLocation)
 	}
 	log.Printf("sqlite: %s", cfg.SQLitePath)
 
@@ -228,15 +241,11 @@ func main() {
 
 func loadConfig() (Config, error) {
 	cfg := Config{
-		AIBackend:           normalizeAIBackend(getEnv("AI_BACKEND", defaultAIBackend)),
-		GeminiModel:         getEnv("GEMINI_MODEL", defaultModel),
-		OpenAIBaseURL:       strings.TrimSpace(firstNonEmpty(os.Getenv("OPENAI_BASE_URL"), os.Getenv("VERTEX_OPENAI_BASE_URL"))),
-		OpenAIAPIKey:        strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
-		GoogleCloudProject:  strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT")),
-		GoogleCloudLocation: strings.TrimSpace(firstNonEmpty(os.Getenv("GOOGLE_CLOUD_LOCATION"), os.Getenv("GOOGLE_CLOUD_REGION"))),
+		AIBackend:           strings.ToLower(strings.TrimSpace(getEnv("AI_BACKEND", defaultAIBackend))),
+		GeminiModel:         openRouterModel(getEnv("GEMINI_MODEL", defaultModel)),
+		OpenAIAPIKey:        strings.TrimSpace(firstNonEmpty(os.Getenv("OPENROUTER_API_KEY"), os.Getenv("OPENAI_API_KEY"))),
 		TavilyAPIKey:        strings.TrimSpace(os.Getenv("TAVILY_API_KEY")),
 		TriggerAlias:        normalizeTriggerAlias(getEnv("TRIGGER_ALIAS", "@grok")),
-		GeminiProxy:         strings.TrimSpace(os.Getenv("GEMINI_PROXY")),
 		SystemPromptEnabled: getEnvAsBool("SYSTEM_PROMPT_ENABLED", true),
 		SystemPrompt:        getEnv("SYSTEM_PROMPT", defaultSystemPrompt),
 		SystemPromptFile:    getEnv("SYSTEM_PROMPT_FILE", ""),
@@ -247,6 +256,14 @@ func loadConfig() (Config, error) {
 		SQLitePath:          getEnv("SQLITE_PATH", "bot.db"),
 		AllowedUserIDs:      getEnvAsInt64List("ALLOWED_USER_IDS"),
 		AllowedGroupIDs:     getEnvAsInt64List("ALLOWED_GROUP_IDS"),
+		CafeteriaEnabled:    getEnvAsBool("CAFETERIA_PREP_ENABLED", true),
+		CafeteriaModel:      openRouterModel(getEnv("CAFETERIA_MODEL", "google/gemini-3.8-flash")),
+		CafeteriaInterval:   getEnvAsInt("CAFETERIA_REFRESH_MINUTES", 60),
+		CafeteriaDaysAhead:  getEnvAsInt("CAFETERIA_DAYS_AHEAD", 14),
+		MenuListenAddr:      strings.TrimSpace(os.Getenv("MENU_LISTEN_ADDR")),
+	}
+	if cfg.CafeteriaInterval <= 0 || cfg.CafeteriaDaysAhead < 0 || cfg.CafeteriaDaysAhead > 90 {
+		return Config{}, errors.New("CAFETERIA_REFRESH_MINUTES must be positive and CAFETERIA_DAYS_AHEAD must be between 0 and 90")
 	}
 
 	cfg.TelegramToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
@@ -254,37 +271,16 @@ func loadConfig() (Config, error) {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
-	switch cfg.AIBackend {
-	case "gemini":
-		cfg.GeminiAPIKey = strings.TrimSpace(firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")))
-		if cfg.GeminiAPIKey == "" {
-			return Config{}, errors.New("GEMINI_API_KEY or GOOGLE_API_KEY is required for AI_BACKEND=gemini")
-		}
-	case "vertex-gemini":
-		if cfg.GoogleCloudProject == "" {
-			return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required for AI_BACKEND=vertex-gemini")
-		}
-		if cfg.GoogleCloudLocation == "" {
-			return Config{}, errors.New("GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION is required for AI_BACKEND=vertex-gemini")
-		}
-	case "openai-compat", "vertex-grok":
-		if cfg.OpenAIBaseURL == "" {
-			if cfg.AIBackend == "vertex-grok" && cfg.GoogleCloudProject != "" {
-				cfg.OpenAIBaseURL = defaultVertexOpenAIBaseURL(cfg.GoogleCloudProject, cfg.GoogleCloudLocation)
-			}
-		}
-		if cfg.OpenAIBaseURL == "" {
-			if cfg.AIBackend == "openai-compat" {
-				return Config{}, errors.New("OPENAI_BASE_URL or VERTEX_OPENAI_BASE_URL is required for AI_BACKEND=openai-compat")
-			}
-			return Config{}, errors.New("OPENAI_BASE_URL, VERTEX_OPENAI_BASE_URL, or GOOGLE_CLOUD_PROJECT is required for AI_BACKEND=vertex-grok")
-		}
-		if cfg.AIBackend == "openai-compat" && cfg.OpenAIAPIKey == "" {
-			return Config{}, errors.New("OPENAI_API_KEY is required for AI_BACKEND=openai-compat")
-		}
-	default:
-		return Config{}, fmt.Errorf("unsupported AI_BACKEND %q (expected gemini, vertex, vertex-gemini, openai-compat, or vertex-grok)", cfg.AIBackend)
+	if cfg.AIBackend != "openrouter" && cfg.AIBackend != "openai-compat" {
+		return Config{}, fmt.Errorf("AI_BACKEND %q is no longer supported; set AI_BACKEND=openrouter", cfg.AIBackend)
 	}
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), "/"); base != "" && base != llm.OpenRouterBaseURL {
+		return Config{}, errors.New("OPENAI_BASE_URL must be https://openrouter.ai/api/v1")
+	}
+	if cfg.OpenAIAPIKey == "" {
+		return Config{}, errors.New("OPENROUTER_API_KEY or OPENAI_API_KEY is required")
+	}
+	cfg.AIBackend = "openrouter"
 
 	if cfg.HistoryLimit < 0 {
 		cfg.HistoryLimit = 0
@@ -398,7 +394,17 @@ func (s *BotService) handleCommand(message *tgbotapi.Message) error {
 		}
 		return s.reply(message.Chat.ID, "Привет. Я Telegram-бот с AI-моделью. Напиши сообщение — и я отвечу. Команда /reset очищает контекст.")
 	case "help":
-		return s.reply(message.Chat.ID, "Команды:\n/start — перезапуск\n/help — помощь\n/reset — очистить контекст\n/status — статус")
+		return s.reply(message.Chat.ID, "Команды:\n/start — перезапуск\n/help — помощь\n/menu — меню столовой\n/reset — очистить контекст\n/status — статус")
+	case "menu":
+		if s.config.MenuListenAddr == "" || s.bot.Self.UserName == "" {
+			return s.reply(message.Chat.ID, "Меню пока не настроено.")
+		}
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Меню столовой:")
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("Открыть меню", "https://t.me/"+s.bot.Self.UserName+"?startapp"),
+		))
+		_, err := s.bot.Send(msg)
+		return err
 	case "reset":
 		if err := s.memory.Clear(message.Chat.ID); err != nil {
 			log.Printf("clear store: %v", err)
@@ -548,16 +554,7 @@ func (s *BotService) generateReplyFromContents(ctx context.Context, contents []l
 		lastErr = err
 
 		if isModelNotFoundError(err) {
-			fallbackModel, resolveErr := llm.ResolveModelName(ctx, llmConfig(s.config), "", preferredModels)
-			if resolveErr != nil {
-				return "", err
-			}
-
-			if fallbackModel != "" && fallbackModel != s.config.GeminiModel {
-				log.Printf("switching model from %s to %s", s.config.GeminiModel, fallbackModel)
-				s.config.GeminiModel = fallbackModel
-				continue
-			}
+			break
 		}
 
 		if isQuotaError(err) {
@@ -964,6 +961,24 @@ func (s *BotService) executeCafeteriaMenuTool(ctx context.Context, functionCall 
 }
 
 func (s *BotService) fetchCafeteriaWeeklyPlan(ctx context.Context, date string) (*CafeteriaWeeklyPlan, error) {
+	plans, err := s.fetchCafeteriaWeek(ctx, date)
+	if err != nil {
+		return nil, err
+	}
+	if s.cafeteria != nil {
+		if err := s.cafeteria.ingest(ctx, plans); err != nil {
+			log.Printf("cafeteria save requested menu: %v", err)
+		}
+	}
+	for _, plan := range plans {
+		if plan.Date == date {
+			return &plan, nil
+		}
+	}
+	return nil, fmt.Errorf("no cafeteria menu found for %s", date)
+}
+
+func (s *BotService) fetchCafeteriaWeek(ctx context.Context, date string) ([]CafeteriaWeeklyPlan, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://api.arambyeol.com/plans/weekly/%s", date), nil)
 	if err != nil {
 		return nil, err
@@ -991,13 +1006,7 @@ func (s *BotService) fetchCafeteriaWeeklyPlan(ctx context.Context, date string) 
 		return nil, err
 	}
 
-	for _, plan := range plans {
-		if plan.Date == date {
-			return &plan, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no cafeteria menu found for %s", date)
+	return plans, nil
 }
 
 func (s *BotService) tavilySearch(ctx context.Context, query string) (*TavilySearchResponse, error) {
@@ -1173,10 +1182,6 @@ func userFacingLLMError(err error) string {
 		return "Картинка слишком большая для обработки. Отправь более легкое изображение или сожми файл."
 	}
 
-	if strings.Contains(strings.ToLower(message), "openai-compatible adapter does not support image") {
-		return "Для этого backend изображения пока не поддерживаются. Переключись на Gemini backend или отправь текстовый запрос."
-	}
-
 	if isQuotaError(err) {
 		if retryDelay := extractRetryDelay(err); retryDelay > 0 {
 			return fmt.Sprintf("Лимит модели сейчас исчерпан. Попробуй снова примерно через %s.", retryDelay.Round(time.Second))
@@ -1186,32 +1191,28 @@ func userFacingLLMError(err error) string {
 	}
 
 	if isModelNotFoundError(err) {
-		return "У текущих credentials недоступна выбранная модель. Я попробовал подобрать доступную, но не смог. Проверь имя модели и доступы."
+		return "Выбранная модель недоступна в OpenRouter. Проверь её идентификатор и доступ к ней."
 	}
 
 	return "Не смог получить ответ от модели. Попробуй ещё раз через пару секунд."
 }
 
 func isQuotaError(err error) bool {
-	var apiErr genai.APIError
+	var apiErr *llm.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
 
-	if apiErr.Code == 429 {
-		return true
-	}
-
-	return apiErr.Status == "RESOURCE_EXHAUSTED"
+	return apiErr.StatusCode == 429
 }
 
 func isModelNotFoundError(err error) bool {
-	var apiErr genai.APIError
+	var apiErr *llm.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
 
-	if apiErr.Code == 404 || apiErr.Status == "NOT_FOUND" {
+	if apiErr.StatusCode == 404 {
 		return true
 	}
 
@@ -1219,29 +1220,12 @@ func isModelNotFoundError(err error) bool {
 }
 
 func extractRetryDelay(err error) time.Duration {
-	var apiErr genai.APIError
+	var apiErr *llm.APIError
 	if !errors.As(err, &apiErr) {
 		return 0
 	}
 
-	for _, detail := range apiErr.Details {
-		typeName, _ := detail["@type"].(string)
-		if !strings.Contains(typeName, "RetryInfo") {
-			continue
-		}
-
-		rawDelay, _ := detail["retryDelay"].(string)
-		if rawDelay == "" {
-			continue
-		}
-
-		parsed, parseErr := time.ParseDuration(rawDelay)
-		if parseErr == nil {
-			return parsed
-		}
-	}
-
-	return 0
+	return apiErr.RetryAfter
 }
 
 func (s *BotService) reply(chatID int64, text string) error {
@@ -1256,6 +1240,7 @@ func NewSQLiteStore(path string, maxItems int) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 
 	store := &SQLiteStore{db: db, maxItems: maxItems}
 	if err := store.init(); err != nil {
@@ -1285,8 +1270,7 @@ func (s *SQLiteStore) init() error {
 			return err
 		}
 	}
-
-	return nil
+	return s.initCafeteria()
 }
 
 func (s *SQLiteStore) Get(chatID int64) []ChatMessage {
@@ -1559,30 +1543,15 @@ func replaceCaseInsensitive(source, oldValue, newValue string) string {
 }
 
 func llmConfig(cfg Config) llm.Config {
-	return llm.Config{
-		Backend:  cfg.AIBackend,
-		Model:    cfg.GeminiModel,
-		APIKey:   cfg.GeminiAPIKey,
-		BaseURL:  cfg.OpenAIBaseURL,
-		Token:    cfg.OpenAIAPIKey,
-		Project:  cfg.GoogleCloudProject,
-		Location: cfg.GoogleCloudLocation,
-		Proxy:    cfg.GeminiProxy,
-	}
+	return llm.Config{APIKey: cfg.OpenAIAPIKey}
 }
 
-func normalizeAIBackend(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "gemini":
-		return "gemini"
-	case "vertex", "vertex-gemini":
-		return "vertex-gemini"
-	case "openai-compat", "vertex-grok":
-		return value
-	default:
-		return value
+func openRouterModel(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "gemini-") {
+		return "google/" + value
 	}
+	return value
 }
 
 func loadEnvFile() error {
@@ -1607,18 +1576,4 @@ func loadEnvFile() error {
 	}
 
 	return nil
-}
-
-func defaultVertexOpenAIBaseURL(project, location string) string {
-	project = strings.TrimSpace(project)
-	if project == "" {
-		return ""
-	}
-
-	location = strings.TrimSpace(location)
-	if location == "" {
-		location = "global"
-	}
-
-	return fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", project, location)
 }

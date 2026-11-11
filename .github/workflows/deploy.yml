@@ -3,7 +3,7 @@ name: deploy
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: deploy-nomlivps
@@ -13,7 +13,11 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,11 +33,18 @@ jobs:
         run: go build -o bin/telegram-gemini-bot .
 
       - name: Prepare env and credentials
+        env:
+          ENV_CONTENT: ${{ secrets.DEPLOY_ENV_FILE }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.DEPLOY_SERVICE_ACCOUNT_JSON }}
         run: |
+          if [ -z "$ENV_CONTENT" ]; then
+            echo "::error::DEPLOY_ENV_FILE secret is not set"
+            exit 1
+          fi
           mkdir -p /tmp/grok-bot
-          printf '%s' "${{ secrets.DEPLOY_ENV_FILE }}" > /tmp/grok-bot/.env
-          if [ -n "${{ secrets.DEPLOY_SERVICE_ACCOUNT_JSON }}" ]; then
-            printf '%s' "${{ secrets.DEPLOY_SERVICE_ACCOUNT_JSON }}" > /tmp/grok-bot/service-account.json
+          printf '%s' "$ENV_CONTENT" > /tmp/grok-bot/.env
+          if [ -n "$SERVICE_ACCOUNT_JSON" ]; then
+            printf '%s' "$SERVICE_ACCOUNT_JSON" > /tmp/grok-bot/service-account.json
           fi
 
       - name: Deploy to NomliVPS

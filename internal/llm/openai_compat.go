@@ -3,66 +3,34 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
-
-	"cloud.google.com/go/auth"
-	"cloud.google.com/go/auth/credentials"
+	"time"
 )
 
 type openAICompatClient struct {
 	httpClient *http.Client
 	baseURL    string
 	bearer     string
-	creds      *auth.Credentials
 }
 
-const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+const OpenRouterBaseURL = "https://openrouter.ai/api/v1"
 
 func newOpenAICompatClient(cfg Config) (Client, error) {
-	baseURL := strings.TrimSpace(cfg.BaseURL)
-	if baseURL == "" {
-		return nil, fmt.Errorf("base URL is required for backend %q", cfg.Backend)
-	}
-
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse base url: %w", err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("invalid base URL %q", baseURL)
-	}
-
-	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
-		parsed.Path = "/v1"
-	}
-
-	bearer := strings.TrimSpace(firstNonEmptyCompat(cfg.Token, cfg.APIKey))
-	var creds *auth.Credentials
+	bearer := strings.TrimSpace(cfg.APIKey)
 	if bearer == "" {
-		if normalizeBackend(cfg.Backend) != "vertex-grok" && !strings.Contains(parsed.Host, "aiplatform.googleapis.com") {
-			return nil, fmt.Errorf("token is required for backend %q", cfg.Backend)
-		}
-
-		var err error
-		creds, err = credentials.DetectDefault(&credentials.DetectOptions{
-			Scopes: []string{cloudPlatformScope},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("detect application default credentials: %w", err)
-		}
-		creds.TokenProvider = auth.NewCachedTokenProvider(creds.TokenProvider, nil)
+		return nil, fmt.Errorf("OpenRouter API key is required")
 	}
 
 	return &openAICompatClient{
 		httpClient: &http.Client{},
-		baseURL:    strings.TrimRight(parsed.String(), "/"),
+		baseURL:    OpenRouterBaseURL,
 		bearer:     bearer,
-		creds:      creds,
 	}, nil
 }
 
@@ -82,13 +50,7 @@ func (c *openAICompatClient) Generate(ctx context.Context, req Request) (Respons
 		return Response{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	bearer, err := c.authorizationToken(ctx)
-	if err != nil {
-		return Response{}, err
-	}
-	if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
-	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.bearer)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -101,7 +63,8 @@ func (c *openAICompatClient) Generate(ctx context.Context, req Request) (Respons
 		return Response{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Response{}, fmt.Errorf("openai-compatible request failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		retrySeconds, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+		return Response{}, &APIError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(respBody)), RetryAfter: time.Duration(retrySeconds) * time.Second}
 	}
 
 	var decoded openAIChatResponse
@@ -111,31 +74,23 @@ func (c *openAICompatClient) Generate(ctx context.Context, req Request) (Respons
 	return decoded.toResponse(), nil
 }
 
-func (c *openAICompatClient) authorizationToken(ctx context.Context) (string, error) {
-	if c.bearer != "" {
-		return c.bearer, nil
-	}
-	if c.creds == nil {
-		return "", nil
-	}
+type APIError struct {
+	StatusCode int
+	Message    string
+	RetryAfter time.Duration
+}
 
-	token, err := c.creds.Token(ctx)
-	if err != nil {
-		return "", fmt.Errorf("obtain access token from adc: %w", err)
-	}
-	if token == nil || strings.TrimSpace(token.Value) == "" {
-		return "", fmt.Errorf("adc returned empty access token")
-	}
-
-	return strings.TrimSpace(token.Value), nil
+func (e *APIError) Error() string {
+	return fmt.Sprintf("OpenRouter request failed: status %d: %s", e.StatusCode, e.Message)
 }
 
 type openAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Tools       []openAITool    `json:"tools,omitempty"`
-	ToolChoice  string          `json:"tool_choice,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []openAIMessage `json:"messages"`
+	Tools          []openAITool    `json:"tools,omitempty"`
+	ToolChoice     string          `json:"tool_choice,omitempty"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	ResponseFormat any             `json:"response_format,omitempty"`
 }
 
 type openAIMessage struct {
@@ -146,8 +101,6 @@ type openAIMessage struct {
 	Name       string           `json:"name,omitempty"`
 }
 
-type openAITextPart struct{ Type, Text string }
-type openAIImagePart struct{ Type, URL string }
 type openAITool struct {
 	Type     string             `json:"type"`
 	Function openAIToolFunction `json:"function"`
@@ -186,6 +139,9 @@ func toOpenAIChatRequest(req Request) (openAIChatRequest, error) {
 		messages = append(messages, msg)
 	}
 	payload := openAIChatRequest{Model: req.Model, Messages: messages}
+	if req.ResponseSchema != nil {
+		payload.ResponseFormat = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "structured_response", "strict": true, "schema": strictSchema(req.ResponseSchema)}}
+	}
 	if len(req.Tools) > 0 {
 		payload.Tools = make([]openAITool, 0, len(req.Tools))
 		for _, tool := range req.Tools {
@@ -234,7 +190,10 @@ func toOpenAIMessage(content Content) (openAIMessage, error) {
 			textParts++
 			parts = append(parts, map[string]any{"type": "text", "text": part.Text})
 		case len(part.Data) > 0:
-			return openAIMessage{}, fmt.Errorf("openai-compatible adapter does not support image/binary content yet")
+			if !strings.HasPrefix(part.MimeType, "image/") {
+				return openAIMessage{}, fmt.Errorf("unsupported binary MIME type %q", part.MimeType)
+			}
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + part.MimeType + ";base64," + base64.StdEncoding.EncodeToString(part.Data)}})
 		}
 	}
 
@@ -324,7 +283,29 @@ func schemaToMap(schema *Schema) any {
 		}
 		m["properties"] = props
 	}
+	if schema.Items != nil {
+		m["items"] = schemaToMap(schema.Items)
+	}
 	return m
+}
+
+func strictSchema(schema *Schema) any {
+	value, ok := schemaToMap(schema).(map[string]any)
+	if !ok {
+		return value
+	}
+	if strings.EqualFold(schema.Type, "object") {
+		value["additionalProperties"] = false
+		props := make(map[string]any, len(schema.Properties))
+		for key, child := range schema.Properties {
+			props[key] = strictSchema(child)
+		}
+		value["properties"] = props
+	}
+	if schema.Items != nil {
+		value["items"] = strictSchema(schema.Items)
+	}
+	return value
 }
 
 func firstNonEmptyCompat(values ...string) string {

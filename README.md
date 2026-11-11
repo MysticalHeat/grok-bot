@@ -1,13 +1,12 @@
-# Telegram Gemini Bot (Go)
+# Telegram AI Bot (Go)
 
-Лёгкий Telegram-бот на Go с Gemini API или Vertex AI.
+Лёгкий Telegram-бот на Go с моделями через OpenRouter.
 
 ## Что внутри
 
 - Go
 - long polling
-- официальный Gemini SDK: `google.golang.org/genai`
-- in-memory контекст без БД
+- OpenRouter Chat Completions API
 - SQLite-память чатов в одном файле
 - поддержка текста и изображений
 - пример `systemd` unit для VPS
@@ -16,7 +15,7 @@
 
 - Go 1.24+
 - Telegram bot token
-- API key из Google AI Studio или доступ к Vertex AI
+- API key OpenRouter
 
 ## Быстрый старт
 
@@ -26,25 +25,14 @@ go mod tidy
 go run .
 ```
 
-### Local testing для vertex-grok
-
-```bash
-gcloud auth application-default login
-ENV_FILE=.env.vertex-grok.local go run .
-```
-
-Если хочешь стартовать от текущего `.env`, то `.env.vertex-grok.local` может содержать только overrides для backend/model/project — загрузчик сначала прочитает `.env`, а потом применит `ENV_FILE` поверх него.
-
-Пока для `vertex-grok` есть ограничение: изображения не поддерживаются.
+При использовании `ENV_FILE` загрузчик сначала читает `.env`, затем применяет указанный файл поверх него.
 
 ## Переменные окружения
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
-- `AI_BACKEND` — `gemini`, `vertex`, `vertex-gemini`, `openai-compat` или `vertex-grok`, по умолчанию `gemini`
-- `GEMINI_API_KEY` — API key Gemini для `AI_BACKEND=gemini`
-- `GOOGLE_CLOUD_PROJECT` — GCP project для `AI_BACKEND=vertex-gemini`
-- `GOOGLE_CLOUD_LOCATION` — регион Vertex AI для `AI_BACKEND=vertex-gemini`
-- `GEMINI_MODEL` — по умолчанию `gemini-3.1-flash-lite-preview`
+- `AI_BACKEND` — `openrouter`; старое значение `openai-compat` также принимается для совместимости с OpenRouter.
+- `OPENROUTER_API_KEY` — ключ OpenRouter; существующий `OPENAI_API_KEY` поддерживается как запасное имя.
+- `GEMINI_MODEL` — OpenRouter ID разговорной модели, по умолчанию `x-ai/grok-4.3`. Имя переменной сохранено для совместимости; модель может быть любой доступной через OpenRouter.
 - `TAVILY_API_KEY` — включает веб-поиск через Tavily; если не задан, бот работает без интернета
 - `TRIGGER_ALIAS` — текстовый алиас для вызова бота в группе, по умолчанию `@grok`
 - `SYSTEM_PROMPT_ENABLED` — включает или полностью отключает системный промпт, по умолчанию `true`
@@ -55,48 +43,53 @@ ENV_FILE=.env.vertex-grok.local go run .
 - `MAX_IMAGE_BYTES` — максимальный размер изображения для обработки, по умолчанию 8 MB
 - `SQLITE_PATH` — путь к SQLite-файлу с историей чатов
 - `POLL_TIMEOUT_SECONDS` — timeout long polling
-- `GEMINI_PROXY` — HTTP proxy для Gemini Developer API; к Vertex AI не применяется
-- `OPENAI_BASE_URL` — base URL для OpenAI-compatible chat completions API
-- `OPENAI_API_KEY` — bearer token / API key для OpenAI-compatible backend
-- `VERTEX_OPENAI_BASE_URL` — удобный alias для `OPENAI_BASE_URL` при Vertex OpenAI-compatible доступе
+- `OPENAI_BASE_URL` — устаревшая настройка; если задана, должна быть `https://openrouter.ai/api/v1`.
 - `ALLOWED_USER_IDS` — список Telegram user ID через запятую, которым разрешено общение с ботом в личке; пусто — разрешено всем
 - `ALLOWED_GROUP_IDS` — список Telegram chat ID групп/супергрупп через запятую, где боту разрешено отвечать; пусто — разрешено везде; сообщения из неразрешённых чатов игнорируются молча
 
-### Режим Gemini
+### Фоновая подготовка меню
 
-```env
-AI_BACKEND=gemini
-GEMINI_API_KEY=your_google_ai_studio_api_key
-GEMINI_MODEL=gemini-2.5-flash
-```
+Бот при запуске и периодически получает доступные недели меню, сохраняет расписание и ставит уникальные блюда в очередь SQLite. Запрос меню также сохраняет всю полученную неделю и добавляет отсутствующие задачи. Переводы и описания готовятся Gemini через OpenRouter с тем же ключом, что и основной бот; изображения ищутся в Wikimedia Commons. Результат доступен в Mini App после его настройки.
 
-### Режим Vertex AI
+- `CAFETERIA_PREP_ENABLED` — включить подготовку, по умолчанию `true`.
+- `CAFETERIA_MODEL` — OpenRouter ID модели подготовки, по умолчанию `google/gemini-3.8-flash`.
+- `CAFETERIA_REFRESH_MINUTES` — интервал проверки недель, по умолчанию `60`.
+- `CAFETERIA_DAYS_AHEAD` — горизонт подготовки в днях, по умолчанию `14`, от 0 до 90.
+- `TAVILY_API_KEY`, если задан, используется для поиска описания, когда точной статьи Wikipedia нет.
 
-```env
-AI_BACKEND=vertex-gemini
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
-GEMINI_MODEL=gemini-2.5-flash
-```
+Таблицы `cafeteria_dishes`, `cafeteria_schedule`, `cafeteria_cards`, `cafeteria_images` и `cafeteria_jobs` создаются в `SQLITE_PATH` автоматически. Фотографии хранятся как URL с автором, лицензией и ссылкой на источник, не как файлы. Найденные изображения и поисковые источники требуют проверки соответствия; они не являются фотографиями конкретной порции в столовой. Состав в карточке — данные типового источника, а не подтверждённый состав столовой. Неопубликованные недели проверяются повторно; неудачные задачи выполняются с увеличивающейся задержкой, а отсутствие изображения перепроверяется через неделю.
 
-Для `AI_BACKEND=vertex-gemini` нужны Application Default Credentials (например, через service account или `gcloud auth application-default login`).
-
-### OpenAI-compatible режим
-
-```env
-AI_BACKEND=openai-compat
-OPENAI_BASE_URL=https://api.example.com/v1
-OPENAI_API_KEY=your_token
-```
-
-`vertex-grok` использует тот же OpenAI-compatible путь. Для Vertex AI в таком режиме на практике нужны Google auth / ADC и регулярно обновляемые access tokens.
+Прямые подключения к Gemini и Vertex AI больше не используются. В старых `.env` нужно установить `AI_BACKEND=openrouter` и добавить ключ OpenRouter. Если раньше была задана Gemini-модель без префикса, к её имени автоматически добавляется `google/`; доступность старых моделей в OpenRouter нужно проверить отдельно.
 
 ## Команды бота
 
 - `/start`
 - `/help`
+- `/menu` — открыть Mini App с меню столовой
 - `/reset`
 - `/status`
+
+### Mini App с меню
+
+Mini App показывает сохранённое меню за выбранную дату; при открытии выбирается сегодняшний день по времени Сеула. Любой пользователь с подтверждённой Telegram-сессией может просматривать меню, а команда `/menu` доступна в разрешённых чатах. Описания и изображения, ожидающие проверки, помечаются; фотографии являются примерами. Если меню за день не сохранено, показывается пустой экран с пояснением.
+
+Настройка публичного адреса:
+
+1. Направьте DNS поддомена на сервер. Убедитесь, что к нему доступны порты 80 и 443.
+2. Установите HTTPS reverse proxy, например Caddy. Пример `/etc/caddy/Caddyfile` (замените `menu.example.com` на свой поддомен):
+
+   ```caddyfile
+   menu.example.com {
+       reverse_proxy 127.0.0.1:8080
+   }
+   ```
+
+   Caddy автоматически получает и обновляет TLS-сертификат. Убедитесь, что порт 8080 свободен и не опубликован напрямую.
+3. Добавьте `MENU_LISTEN_ADDR=127.0.0.1:8080` в окружение бота и перезапустите сервис. Без этой переменной HTTP-сервер выключен, а `/menu` сообщает, что меню не настроено. При деплое через GitHub Actions обновите также секрет `DEPLOY_ENV_FILE`.
+4. В [@BotFather](https://t.me/BotFather) настройте для бота **Main Mini App** с URL `https://menu.example.com/`. Это необходимо для ссылки из `/menu`, в том числе в группах.
+5. Откройте `/menu` в Telegram и проверьте работу. Открытие HTTPS-адреса вне Telegram не предоставляет доступ к данным. Для повторной авторизации после истечения сессии закройте и откройте Mini App снова.
+
+HTML, CSS и JavaScript встроены в бинарник, дополнительное копирование файлов при деплое не требуется.
 
 ## Поведение в группах
 
@@ -115,7 +108,7 @@ OPENAI_API_KEY=your_token
 - Бот умеет принимать фото из Telegram.
 - Бот умеет принимать изображения, отправленные как file/document (`image/jpeg`, `image/png`, `image/webp`).
 - Можно отправить фото с подписью или без подписи.
-- Если есть подпись, она уйдет в Gemini вместе с изображением.
+- Если есть подпись, она уйдёт в выбранную модель вместе с изображением через OpenRouter. Модель должна поддерживать изображения.
 - Если подписи нет, бот сам попросит модель описать изображение по существу.
 - Если написать боту реплаем на чужую картинку в группе, он сможет использовать это изображение как контекст.
 - Слишком большие изображения бот отклоняет по лимиту `MAX_IMAGE_BYTES`.
@@ -142,10 +135,7 @@ go build -o bin/telegram-gemini-bot .
 1. Собери бинарник.
 2. Скопируй бинарник в `/opt/telegram-gemini-bot/`.
 3. Скопируй `deploy/telegram-gemini-bot-homevpn.env.example` как `.env` и заполни значения.
-4. Скопируй service-account JSON в `/etc/telegram-gemini-bot/service-account.json`.
-5. Скопируй unit из `deploy/telegram-gemini-bot-homevpn.service` в `/etc/systemd/system/`.
-6. Убедись, что `GOOGLE_APPLICATION_CREDENTIALS` указывает на JSON — это и есть ADC для сервера.
-7. Имей в виду: `vertex-grok` в этом приложении поддерживает только текст.
+4. Скопируй unit из `deploy/telegram-gemini-bot-homevpn.service` в `/etc/systemd/system/`.
 
 Команды:
 
@@ -165,24 +155,28 @@ chmod +x deploy/deploy.sh
 deploy/deploy.sh --host your-server --env-file .env
 ```
 
-Пример для HomeVpn / Vertex Grok:
+Пример для HomeVpn / OpenRouter:
 
 ```bash
 deploy/deploy.sh \
   --host your-server \
   --env-file .env.homevpn \
-  --service-file deploy/telegram-gemini-bot-homevpn.service \
-  --credentials-file ~/service-account.json
+  --service-file deploy/telegram-gemini-bot-homevpn.service
 ```
 
 Что делает скрипт:
 
 - локально собирает Linux-бинарник `bin/telegram-gemini-bot`
-- копирует бинарник, `.env` и `systemd` unit на сервер по SSH/SCP
+- копирует бинарник, `.env`, файлы промптов и `systemd` unit на сервер по SSH/SCP
 - создаёт пользователя `telegrambot`, если его ещё нет
 - обновляет файлы в `/opt/telegram-gemini-bot`
-- при необходимости загружает service-account JSON в `/etc/telegram-gemini-bot/service-account.json`
 - делает `systemctl daemon-reload`, `enable`, `restart`, `status`
+
+### GitHub Actions
+
+При push в `master` и ручном запуске workflow `deploy` сначала выполняются `go test`, `go vet` и сборка. Деплой запускается только после успешных проверок. Для pull request те же проверки выполняются отдельно.
+
+При каждом деплое серверный `.env` заменяется содержимым GitHub Actions-секрета `DEPLOY_ENV_FILE`. После изменения окружения на сервере нужно обновить этот секрет, иначе следующий деплой вернёт старую конфигурацию. Workflow `deploy-env` вручную устанавливает содержимое того же секрета и перезапускает сервис.
 
 Справка:
 
@@ -194,8 +188,7 @@ deploy/deploy.sh --help
 
 - История чатов хранится в SQLite и сохраняется после рестарта.
 - Для очень маленького VPS это проще и легче, чем Python/Node + БД + Docker.
-- На старте бот сам пытается выбрать доступную `generateContent` модель через `ListModels`, поэтому можно не угадывать точное имя модели вручную.
-- Если для модели приходит 429 с `limit: 0`, обычно free tier для этой модели недоступен для текущего проекта/аккаунта. Тогда нужен другой API key/проект или paid tier.
-- Если задан `TAVILY_API_KEY`, бот использует function calling: Gemini сам решает, когда нужно сходить в веб-поиск за актуальной информацией.
+- Имена моделей должны соответствовать ID из каталога OpenRouter; автоматической подмены недоступной модели нет.
+- Если для модели приходит 429, проверьте лимиты OpenRouter и доступность модели.
+- Если задан `TAVILY_API_KEY`, бот использует function calling: модель решает, когда нужно сходить в веб-поиск за актуальной информацией.
 - Бот умеет получать меню столовой через API `api.arambyeol.com` и может отвечать на запросы вроде «какое сегодня меню в столовке».
-- Для Vertex AI доступность моделей зависит от проекта и региона.
