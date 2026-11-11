@@ -186,7 +186,7 @@ func TestCardInvalidJSONAndNoSource(t *testing.T) {
 
 func TestImageCandidateAndMissingImage(t *testing.T) {
 	ctx := context.Background()
-	body := `{"query":{"pages":[{"title":"File:rice.jpg","imageinfo":[{"url":"https://example.org/rice.jpg","descriptionurl":"https://example.org/page","extmetadata":{"Artist":{"value":"A"},"LicenseShortName":{"value":"CC BY 4.0"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
+	body := `{"query":{"pages":[{"title":"File:rice.jpg","imageinfo":[{"url":"https://example.org/rice.jpg","mime":"image/jpeg","descriptionurl":"https://example.org/page","extmetadata":{"SomeNumber":{"value":42},"Artist":{"value":"A"},"LicenseShortName":{"value":"CC BY 4.0"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
 	p := newCafeteriaPreparer(nil, jsonClient(body), Config{})
 	img, err := p.searchImage(ctx, "쌀밥")
 	if err != nil || img.Status != "needs_review" || img.Author != "A" || img.URL == "" {
@@ -196,6 +196,87 @@ func TestImageCandidateAndMissingImage(t *testing.T) {
 	img, err = p.searchImage(ctx, "unknown")
 	if err != nil || img.Status != "not_found" {
 		t.Fatalf("image=%+v err=%v", img, err)
+	}
+}
+
+func TestTranslationSurvivesWikipediaRateLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.saveCafeteriaWeek(ctx, []CafeteriaWeeklyPlan{{Date: "2026-11-09", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 16, MenuName: "쌀밥"}}}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.claimCafeteriaJob(ctx, now, "token")
+	if err != nil || j == nil {
+		t.Fatalf("claim: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{"Retry-After": []string{"120"}}, Request: r}, nil
+	})}
+	p := newCafeteriaPreparer(s, client, Config{CafeteriaModel: "test"})
+	p.model = fakeModel{text: `{"translated_name":"Рис","short_description":"","description":"","typical_ingredients":["salt"],"needs_review":false,"review_reason":""}`}
+	if err := p.prepareCard(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	var translation, ingredients string
+	var review bool
+	if err := s.db.QueryRow(`SELECT translated_name,typical_ingredients,needs_review FROM cafeteria_cards WHERE dish_id=?`, j.DishID).Scan(&translation, &ingredients, &review); err != nil {
+		t.Fatal(err)
+	}
+	if translation != "Рис" || ingredients != "null" || !review {
+		t.Fatalf("card: %s %s %v", translation, ingredients, review)
+	}
+	var until int64
+	if err := s.db.QueryRow(`SELECT until FROM cafeteria_source_cooldowns WHERE host='ko.wikipedia.org'`).Scan(&until); err != nil || until < now.Add(110*time.Second).Unix() {
+		t.Fatalf("cooldown: %d, %v", until, err)
+	}
+	var references int
+	if err := s.db.QueryRow(`SELECT count(*) FROM cafeteria_jobs WHERE kind='reference' AND status='pending'`).Scan(&references); err != nil || references != 1 {
+		t.Fatalf("reference retry: %d, %v", references, err)
+	}
+}
+
+func TestImageCooldownPersistsAndSkipsJobs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.saveCafeteriaWeek(ctx, []CafeteriaWeeklyPlan{{Date: "2026-11-09", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 1, MenuName: "rice"}}}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE cafeteria_jobs SET status='done' WHERE kind='card'`); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 429, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	})}
+	p := newCafeteriaPreparer(s, client, Config{})
+	if _, err := p.searchImage(ctx, "rice"); err == nil {
+		t.Fatal("expected rate limit")
+	}
+	j, err := s.claimCafeteriaJob(ctx, now, "token")
+	if err != nil || j != nil {
+		t.Fatalf("cooldown not respected: job=%+v err=%v", j, err)
+	}
+	j, err = s.claimCafeteriaJob(ctx, now.Add(11*time.Minute), "token")
+	if err != nil || j == nil || j.Kind != "image" {
+		t.Fatalf("job not resumed: job=%+v err=%v", j, err)
+	}
+}
+
+func TestImageFallbackStripsSauce(t *testing.T) {
+	var searches []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		searches = append(searches, r.URL.Query().Get("gsrsearch"))
+		body := `{"query":{"pages":[]}}`
+		if len(searches) == 2 {
+			body = `{"query":{"pages":[{"title":"File:rice.jpg","imageinfo":[{"url":"https://example.org/rice.jpg","mime":"image/jpeg","extmetadata":{"LicenseShortName":{"value":"CC"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}
+	p := newCafeteriaPreparer(nil, client, Config{})
+	img, err := p.searchImage(context.Background(), "rice*sauce")
+	if err != nil || img.URL == "" || len(searches) != 2 || searches[1] != "rice" {
+		t.Fatalf("image=%+v searches=%v err=%v", img, searches, err)
 	}
 }
 

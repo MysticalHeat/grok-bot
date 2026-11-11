@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,15 +20,16 @@ import (
 )
 
 type cafeteriaPreparer struct {
-	store  *SQLiteStore
-	http   *http.Client
-	config Config
-	model  llm.Client
-	wake   chan struct{}
+	store             *SQLiteStore
+	http              *http.Client
+	config            Config
+	model             llm.Client
+	wake              chan struct{}
+	lastSourceRequest map[string]time.Time
 }
 
 func newCafeteriaPreparer(store *SQLiteStore, client *http.Client, cfg Config) *cafeteriaPreparer {
-	return &cafeteriaPreparer{store: store, http: client, config: cfg, wake: make(chan struct{}, 1)}
+	return &cafeteriaPreparer{store: store, http: client, config: cfg, wake: make(chan struct{}, 1), lastSourceRequest: make(map[string]time.Time)}
 }
 
 func (p *cafeteriaPreparer) ingest(ctx context.Context, plans []CafeteriaWeeklyPlan) error {
@@ -173,12 +176,48 @@ func (p *cafeteriaPreparer) getJSON(ctx context.Context, base string, params url
 	if err != nil {
 		return err
 	}
+	host := req.URL.Hostname()
+	if p.store != nil {
+		var until int64
+		err := p.store.db.QueryRowContext(ctx, `SELECT until FROM cafeteria_source_cooldowns WHERE host=?`, host).Scan(&until)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if time.Now().Unix() < until {
+			return fmt.Errorf("source %s rate limited until %s", host, time.Unix(until, 0).Format(time.RFC3339))
+		}
+	}
+	if delay := time.Until(p.lastSourceRequest[host].Add(time.Second)); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	p.lastSourceRequest[host] = time.Now()
 	req.Header.Set("User-Agent", "ArambyeolMenuBot/1.0 (menu enrichment; Go HTTP client)")
 	resp, err := p.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests && p.store != nil {
+		delay := 10 * time.Minute
+		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
+			delay = time.Duration(seconds) * time.Second
+		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil && time.Until(date) > 0 {
+			delay = time.Until(date)
+		}
+		if delay < time.Minute {
+			delay = time.Minute
+		}
+		_, err := p.store.db.ExecContext(ctx, `INSERT INTO cafeteria_source_cooldowns(host,until) VALUES(?,?) ON CONFLICT(host) DO UPDATE SET until=max(until,excluded.until)`, host, time.Now().Add(delay).Unix())
+		if err != nil {
+			return fmt.Errorf("persist source cooldown: %w", err)
+		}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("source %s returned HTTP %d", req.URL.Host, resp.StatusCode)
 	}
@@ -193,8 +232,17 @@ type wikiPage struct {
 	ImageInfo []struct {
 		URL            string `json:"url"`
 		DescriptionURL string `json:"descriptionurl"`
-		Metadata       map[string]struct {
-			Value string `json:"value"`
+		MIME           string `json:"mime"`
+		Metadata       struct {
+			Artist struct {
+				Value string `json:"value"`
+			} `json:"Artist"`
+			LicenseShortName struct {
+				Value string `json:"value"`
+			} `json:"LicenseShortName"`
+			LicenseURL struct {
+				Value string `json:"value"`
+			} `json:"LicenseUrl"`
 		} `json:"extmetadata"`
 	} `json:"imageinfo"`
 }
@@ -227,6 +275,18 @@ func (p *cafeteriaPreparer) wikipedia(ctx context.Context, name string) (string,
 }
 
 func (p *cafeteriaPreparer) searchImage(ctx context.Context, name string) (cafeteriaImage, error) {
+	image, err := p.searchImageQuery(ctx, name)
+	if err != nil || image.Status != "not_found" {
+		return image, err
+	}
+	// Menu names often append a sauce after an asterisk; search the dish itself.
+	if dish, _, ok := strings.Cut(name, "*"); ok && strings.TrimSpace(dish) != "" {
+		return p.searchImageQuery(ctx, strings.TrimSpace(dish))
+	}
+	return image, nil
+}
+
+func (p *cafeteriaPreparer) searchImageQuery(ctx context.Context, name string) (cafeteriaImage, error) {
 	var data wikiResponse
 	params := url.Values{"action": {"query"}, "format": {"json"}, "formatversion": {"2"}, "generator": {"search"}, "gsrsearch": {name}, "gsrnamespace": {"6"}, "gsrlimit": {"5"}, "prop": {"imageinfo"}, "iiprop": {"url|extmetadata|mime"}}
 	if err := p.getJSON(ctx, "https://commons.wikimedia.org/w/api.php", params, &data); err != nil {
@@ -240,10 +300,10 @@ func (p *cafeteriaPreparer) searchImage(ctx context.Context, name string) (cafet
 			continue
 		}
 		info := page.ImageInfo[0]
-		if !strings.HasPrefix(info.URL, "https://") || info.Metadata["LicenseShortName"].Value == "" || info.Metadata["LicenseUrl"].Value == "" {
+		if !strings.HasPrefix(info.URL, "https://") || (info.MIME != "image/jpeg" && info.MIME != "image/png" && info.MIME != "image/webp") || info.Metadata.LicenseShortName.Value == "" || !strings.HasPrefix(info.Metadata.LicenseURL.Value, "https://") {
 			continue
 		}
-		return cafeteriaImage{URL: info.URL, SourceURL: info.DescriptionURL, Author: info.Metadata["Artist"].Value, License: info.Metadata["LicenseShortName"].Value, LicenseURL: info.Metadata["LicenseUrl"].Value, Caption: page.Title, Status: "needs_review"}, nil
+		return cafeteriaImage{URL: info.URL, SourceURL: info.DescriptionURL, Author: info.Metadata.Artist.Value, License: info.Metadata.LicenseShortName.Value, LicenseURL: info.Metadata.LicenseURL.Value, Caption: page.Title, Status: "needs_review"}, nil
 	}
 	return cafeteriaImage{Status: "not_found"}, nil
 }
@@ -278,7 +338,11 @@ func (p *cafeteriaPreparer) prepareCard(ctx context.Context, job *cafeteriaJob) 
 		var err error
 		text, source, searchCandidate, err = p.reference(ctx, job.Name)
 		if err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			log.Printf("cafeteria reference for job %d: %v; translating without source", job.ID, err)
+			text, source, searchCandidate = "", "", false
 		}
 	}
 	prompt, _ := json.Marshal(map[string]string{"name": job.Name, "kind": job.DishKind, "reference_text": text, "reference_url": source})

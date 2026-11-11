@@ -46,6 +46,7 @@ func (s *SQLiteStore) initCafeteria() error {
 			available_at INTEGER NOT NULL, lease_until INTEGER NOT NULL DEFAULT 0, lease_token TEXT NOT NULL DEFAULT '',
 			last_error TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, UNIQUE(dish_id,kind))`,
 		`CREATE INDEX IF NOT EXISTS cafeteria_jobs_due ON cafeteria_jobs(status,available_at,lease_until)`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_source_cooldowns (host TEXT PRIMARY KEY, until INTEGER NOT NULL)`,
 	}
 	for _, q := range statements {
 		if _, err := s.db.Exec(q); err != nil {
@@ -126,8 +127,10 @@ type cafeteriaJob struct {
 func (s *SQLiteStore) claimCafeteriaJob(ctx context.Context, now time.Time, token string) (*cafeteriaJob, error) {
 	var j cafeteriaJob
 	err := s.db.QueryRowContext(ctx, `UPDATE cafeteria_jobs SET status='running',lease_until=?,lease_token=?,attempts=attempts+1,updated_at=?
-		WHERE id=(SELECT id FROM cafeteria_jobs WHERE available_at<=? AND (status='pending' OR (status='running' AND lease_until<=?)) ORDER BY available_at,id LIMIT 1)
-		RETURNING id,dish_id,kind,attempts`, now.Add(5*time.Minute).Unix(), token, now.Unix(), now.Unix(), now.Unix()).Scan(&j.ID, &j.DishID, &j.Kind, &j.Attempts)
+		WHERE id=(SELECT id FROM cafeteria_jobs WHERE available_at<=? AND (status='pending' OR (status='running' AND lease_until<=?))
+		AND NOT EXISTS (SELECT 1 FROM cafeteria_source_cooldowns c WHERE c.until>? AND ((kind='image' AND c.host='commons.wikimedia.org') OR (kind='reference' AND c.host='ko.wikipedia.org')))
+		ORDER BY available_at,id LIMIT 1)
+		RETURNING id,dish_id,kind,attempts`, now.Add(5*time.Minute).Unix(), token, now.Unix(), now.Unix(), now.Unix(), now.Unix()).Scan(&j.ID, &j.DishID, &j.Kind, &j.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
