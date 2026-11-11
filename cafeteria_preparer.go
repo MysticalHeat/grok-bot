@@ -135,6 +135,9 @@ func (p *cafeteriaPreparer) drain(ctx context.Context) {
 				shift = 0
 			}
 			retry = time.Minute * time.Duration(1<<shift)
+			if errors.Is(err, errImageBudgetBlocked) {
+				retry = 6 * time.Hour
+			}
 		}
 		if finishErr := p.store.finishCafeteriaJob(ctx, job, retry, err); finishErr != nil {
 			log.Printf("cafeteria finish job: %v", finishErr)
@@ -157,7 +160,7 @@ func (p *cafeteriaPreparer) process(ctx context.Context, job *cafeteriaJob) (tim
 		}
 		return 0, p.store.requeueCard(ctx, job)
 	case "image":
-		image, err := p.searchImage(ctx, job.Name)
+		image, err := p.prepareVerifiedImage(ctx, job)
 		if err != nil {
 			return 0, err
 		}
@@ -234,6 +237,7 @@ type wikiPage struct {
 	Missing   bool   `json:"missing"`
 	ImageInfo []struct {
 		URL            string `json:"url"`
+		ThumbURL       string `json:"thumburl"`
 		DescriptionURL string `json:"descriptionurl"`
 		MIME           string `json:"mime"`
 		Metadata       struct {

@@ -45,7 +45,7 @@ func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string]
 		COALESCE(i.image_url,''), COALESCE(i.source_url,''), COALESCE(i.author,''),
 		COALESCE(i.license,''), COALESCE(i.license_url,''), COALESCE(i.status,'')
 		FROM cafeteria_schedule s JOIN cafeteria_dishes d ON d.id=s.dish_id
-		LEFT JOIN cafeteria_cards c ON c.dish_id=d.id LEFT JOIN cafeteria_images i ON i.dish_id=d.id
+		LEFT JOIN cafeteria_cards c ON c.dish_id=d.id LEFT JOIN cafeteria_images i ON i.dish_id=d.id AND i.status='approved'
 		WHERE s.service_date=? ORDER BY s.meal_type,s.position`, date)
 	if err != nil {
 		return nil, err

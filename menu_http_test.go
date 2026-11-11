@@ -119,3 +119,23 @@ func TestMenuHandler(t *testing.T) {
 		t.Fatalf("assets: %d", got)
 	}
 }
+
+func TestMenuOnlyExposesApprovedImages(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	plan := []CafeteriaWeeklyPlan{{Date: "2026-11-12", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 1, MenuName: "rice"}, {MenuID: 2, MenuName: "soup"}}}}}
+	if err := s.saveCafeteriaWeek(ctx, plan, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.db.Exec(`INSERT INTO cafeteria_images(dish_id,image_url,status,checked_at) SELECT id,'https://example.com/'||name,CASE name WHEN 'rice' THEN 'needs_review' ELSE 'approved' END,0 FROM cafeteria_dishes`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meals, err := s.menuForDate(ctx, "2026-11-12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meals["LUNCH"][0].ImageURL != "" || meals["LUNCH"][1].ImageURL != "https://example.com/soup" {
+		t.Fatalf("unexpected images: %+v", meals["LUNCH"])
+	}
+}

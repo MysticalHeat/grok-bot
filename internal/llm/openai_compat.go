@@ -86,6 +86,7 @@ func (e *APIError) Error() string {
 
 type openAIChatRequest struct {
 	Model          string          `json:"model"`
+	MaxTokens      int             `json:"max_tokens,omitempty"`
 	Messages       []openAIMessage `json:"messages"`
 	Tools          []openAITool    `json:"tools,omitempty"`
 	ToolChoice     string          `json:"tool_choice,omitempty"`
@@ -119,6 +120,11 @@ type openAIToolCall struct {
 	} `json:"function"`
 }
 type openAIChatResponse struct {
+	Usage *struct {
+		PromptTokens     int      `json:"prompt_tokens"`
+		CompletionTokens int      `json:"completion_tokens"`
+		Cost             *float64 `json:"cost"`
+	} `json:"usage"`
 	Choices []struct {
 		Message openAIResponseMessage `json:"message"`
 	} `json:"choices"`
@@ -138,7 +144,7 @@ func toOpenAIChatRequest(req Request) (openAIChatRequest, error) {
 		}
 		messages = append(messages, msg)
 	}
-	payload := openAIChatRequest{Model: req.Model, Messages: messages}
+	payload := openAIChatRequest{Model: req.Model, Messages: messages, MaxTokens: req.MaxTokens}
 	if req.ResponseSchema != nil {
 		payload.ResponseFormat = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "structured_response", "strict": true, "schema": strictSchema(req.ResponseSchema)}}
 	}
@@ -217,6 +223,9 @@ func (r openAIChatResponse) toResponse() Response {
 	m := r.Choices[0].Message
 	text := extractOpenAIText(m.Content)
 	resp := Response{Text: text}
+	if r.Usage != nil {
+		resp.Usage = &Usage{PromptTokens: r.Usage.PromptTokens, CompletionTokens: r.Usage.CompletionTokens, Cost: r.Usage.Cost}
+	}
 	delta := Content{Role: strings.TrimSpace(firstNonEmptyCompat(m.Role, "assistant"))}
 	if text != "" {
 		delta.Parts = append(delta.Parts, Part{Text: text})

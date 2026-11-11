@@ -6,6 +6,7 @@ type Config struct {
 
 type Request struct {
 	Model          string
+	MaxTokens      int
 	Contents       []Content
 	Tools          []Tool
 	ResponseSchema *Schema
@@ -13,8 +14,15 @@ type Request struct {
 
 type Response struct {
 	Text              string
+	Usage             *Usage
 	FunctionCalls     []FunctionCall
 	ConversationDelta []Content
+}
+
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	Cost             *float64
 }
 
 type Content struct {

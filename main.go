@@ -127,6 +127,12 @@ type CafeteriaMenu struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "image-pilot" {
+		if err := runImagePilotCommand(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

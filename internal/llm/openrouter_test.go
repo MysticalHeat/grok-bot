@@ -91,3 +91,20 @@ func TestRejectNonImageBinary(t *testing.T) {
 		t.Fatal("expected error for non-image binary")
 	}
 }
+
+func TestOpenRouterUsageAndMaxTokens(t *testing.T) {
+	c := &openAICompatClient{baseURL: OpenRouterBaseURL, bearer: "key", httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var payload struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.MaxTokens != 512 {
+			t.Fatalf("payload=%+v error=%v", payload, err)
+		}
+		body := `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1200,"completion_tokens":100,"cost":0.003}}`
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}}
+	response, err := c.Generate(context.Background(), Request{Model: "test", MaxTokens: 512, Contents: []Content{{Role: "user", Parts: []Part{{Text: "hello"}}}}})
+	if err != nil || response.Usage == nil || response.Usage.Cost == nil || *response.Usage.Cost != 0.003 || response.Usage.PromptTokens != 1200 {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+}

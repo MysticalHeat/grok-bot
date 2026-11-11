@@ -34,12 +34,17 @@
     const card = element('button', '', 'dish-card');
     card.type = 'button';
     const imageURL = safeURL(dish.image_url);
+    const placeholder = () => {
+      const node = element('div', '🍽', 'thumb thumb-placeholder');
+      node.setAttribute('aria-hidden', 'true');
+      return node;
+    };
     if (imageURL && dish.image_status !== 'not_found') {
       const img = element('img', '', 'thumb');
       img.src = imageURL; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
-      img.onerror = () => img.remove();
+      img.onerror = () => img.replaceWith(placeholder());
       card.append(img);
-    }
+    } else card.append(placeholder());
     const title = element('div');
     title.append(element('div', dish.translated_name || dish.name, 'dish-title'));
     if (dish.translated_name) title.append(element('div', dish.name, 'original'));

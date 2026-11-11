@@ -47,13 +47,68 @@ func (s *SQLiteStore) initCafeteria() error {
 			last_error TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, UNIQUE(dish_id,kind))`,
 		`CREATE INDEX IF NOT EXISTS cafeteria_jobs_due ON cafeteria_jobs(status,available_at,lease_until)`,
 		`CREATE TABLE IF NOT EXISTS cafeteria_source_cooldowns (host TEXT PRIMARY KEY, until INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_image_pilot (
+			id INTEGER PRIMARY KEY, dish_id INTEGER NOT NULL REFERENCES cafeteria_dishes(id),
+			caption TEXT NOT NULL, image_url TEXT NOT NULL, source_url TEXT NOT NULL,
+			author TEXT NOT NULL, license TEXT NOT NULL, license_url TEXT NOT NULL,
+			thumbnail_url TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, prompt_version TEXT NOT NULL,
+			state TEXT NOT NULL, decision TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+			reserved_usd REAL NOT NULL DEFAULT 0, cost_usd REAL, prompt_tokens INTEGER, completion_tokens INTEGER,
+			updated_at INTEGER NOT NULL, UNIQUE(dish_id,caption,model,prompt_version))`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_image_profiles (
+			dish_id INTEGER PRIMARY KEY REFERENCES cafeteria_dishes(id), canonical_name TEXT NOT NULL,
+			features TEXT NOT NULL, search_query TEXT NOT NULL, model TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_image_candidates (
+			dish_id INTEGER NOT NULL REFERENCES cafeteria_dishes(id), caption TEXT NOT NULL,
+			image_url TEXT NOT NULL, source_url TEXT NOT NULL, author TEXT NOT NULL,
+			license TEXT NOT NULL, license_url TEXT NOT NULL, thumbnail_url TEXT NOT NULL DEFAULT '',
+			search_query TEXT NOT NULL, decision TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '', prompt_version TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL,
+			PRIMARY KEY(dish_id,caption))`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_image_spend (
+			id INTEGER PRIMARY KEY, dish_id INTEGER NOT NULL, purpose TEXT NOT NULL,
+			state TEXT NOT NULL, reserved_usd REAL NOT NULL, cost_usd REAL,
+			prompt_tokens INTEGER, completion_tokens INTEGER, updated_at INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS cafeteria_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`,
 	}
 	for _, q := range statements {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.initVerifiedImages()
+}
+
+func (s *SQLiteStore) initVerifiedImages() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var applied int
+	if err := tx.QueryRow(`SELECT count(*) FROM cafeteria_migrations WHERE name='verified-images-v1'`).Scan(&applied); err != nil {
+		return err
+	}
+	if applied != 0 {
+		return nil
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO cafeteria_image_candidates(dish_id,caption,image_url,source_url,author,license,license_url,thumbnail_url,search_query,decision,reason,model,prompt_version,updated_at)
+		SELECT dish_id,caption,image_url,source_url,author,license,license_url,thumbnail_url,'',decision,reason,model,prompt_version,updated_at FROM cafeteria_image_pilot WHERE state='completed' AND decision IN ('approve','reject','review')`); err != nil {
+		return err
+	}
+	// Pilot approvals were visually reviewed; every other legacy image stays hidden.
+	if _, err := tx.Exec(`UPDATE cafeteria_images SET status='approved', image_url=(SELECT p.thumbnail_url FROM cafeteria_image_pilot p WHERE p.dish_id=cafeteria_images.dish_id AND p.caption=cafeteria_images.caption AND p.state='completed' AND p.decision='approve' AND p.thumbnail_url<>'' ORDER BY p.id DESC LIMIT 1)
+		WHERE EXISTS (SELECT 1 FROM cafeteria_image_pilot p WHERE p.dish_id=cafeteria_images.dish_id AND p.caption=cafeteria_images.caption AND p.state='completed' AND p.decision='approve' AND p.thumbnail_url<>'')`); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`UPDATE cafeteria_jobs SET status='pending',available_at=?,attempts=0,updated_at=? WHERE kind='image' AND status<>'running' AND dish_id IN (SELECT d.id FROM cafeteria_dishes d JOIN cafeteria_schedule s ON s.dish_id=d.id LEFT JOIN cafeteria_images i ON i.dish_id=d.id WHERE s.service_date>=date('now','+9 hours') AND d.kind='dish' AND COALESCE(i.status,'')<>'approved')`, now, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO cafeteria_migrations(name,applied_at) VALUES('verified-images-v1',?)`, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func dishKind(name string) string {
