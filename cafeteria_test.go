@@ -186,7 +186,7 @@ func TestCardInvalidJSONAndNoSource(t *testing.T) {
 
 func TestImageCandidateAndMissingImage(t *testing.T) {
 	ctx := context.Background()
-	body := `{"query":{"pages":[{"title":"File:rice.jpg","imageinfo":[{"url":"https://example.org/rice.jpg","mime":"image/jpeg","descriptionurl":"https://example.org/page","extmetadata":{"SomeNumber":{"value":42},"Artist":{"value":"A"},"LicenseShortName":{"value":"CC BY 4.0"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
+	body := `{"query":{"pages":[{"title":"File:쌀밥.jpg","imageinfo":[{"url":"https://example.org/rice.jpg","mime":"image/jpeg","descriptionurl":"https://example.org/page","extmetadata":{"SomeNumber":{"value":42},"Artist":{"value":"A"},"LicenseShortName":{"value":"CC BY 4.0"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
 	p := newCafeteriaPreparer(nil, jsonClient(body), Config{})
 	img, err := p.searchImage(ctx, "쌀밥")
 	if err != nil || img.Status != "needs_review" || img.Author != "A" || img.URL == "" {
@@ -275,8 +275,43 @@ func TestImageFallbackStripsSauce(t *testing.T) {
 	})}
 	p := newCafeteriaPreparer(nil, client, Config{})
 	img, err := p.searchImage(context.Background(), "rice*sauce")
-	if err != nil || img.URL == "" || len(searches) != 2 || searches[1] != "rice" {
+	if err != nil || img.URL == "" || len(searches) != 2 || searches[1] != "rice filetype:bitmap" {
 		t.Fatalf("image=%+v searches=%v err=%v", img, searches, err)
+	}
+}
+
+func TestImageFallbackSearchesTranslatedDish(t *testing.T) {
+	var searches []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		searches = append(searches, r.URL.Query().Get("gsrsearch"))
+		body := `{"query":{"pages":[]}}`
+		if len(searches) == 2 {
+			body = `{"query":{"pages":[{"title":"File:chicken breast salad.jpg","imageinfo":[{"url":"https://example.org/salad.jpg","mime":"image/jpeg","extmetadata":{"LicenseShortName":{"value":"CC"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}
+	p := newCafeteriaPreparer(nil, client, Config{CafeteriaModel: "test"})
+	p.model = fakeModel{text: `{"query":"chicken breast salad"}`}
+	img, err := p.searchImage(context.Background(), "닭가슴살샐러드")
+	if err != nil || img.URL == "" || len(searches) != 2 || searches[1] != "chicken breast salad filetype:bitmap" {
+		t.Fatalf("image=%+v searches=%v err=%v", img, searches, err)
+	}
+}
+
+func TestImageSearchTranslationRejectsOperators(t *testing.T) {
+	p := newCafeteriaPreparer(nil, jsonClient(`{}`), Config{})
+	p.model = fakeModel{text: `{"query":"rice -filetype:bitmap"}`}
+	if _, err := p.imageSearchTranslation(context.Background(), "쌀밥"); err == nil {
+		t.Fatal("expected search operator to be rejected")
+	}
+}
+
+func TestImageSearchFiltersUnrelatedAndUsesRelevance(t *testing.T) {
+	body := `{"query":{"pages":[{"index":1,"title":"File:Person.jpg","imageinfo":[{"url":"https://example.org/person.jpg","mime":"image/jpeg","extmetadata":{"LicenseShortName":{"value":"CC"},"LicenseUrl":{"value":"https://example.org/license"}}}]},{"index":3,"title":"File:Chicken breast salad 2.jpg","imageinfo":[{"url":"https://example.org/second.jpg","mime":"image/jpeg","extmetadata":{"LicenseShortName":{"value":"CC"},"LicenseUrl":{"value":"https://example.org/license"}}}]},{"index":2,"title":"File:Chicken breast salad.jpg","imageinfo":[{"url":"https://example.org/first.jpg","mime":"image/jpeg","extmetadata":{"LicenseShortName":{"value":"CC"},"LicenseUrl":{"value":"https://example.org/license"}}}]}]}}`
+	p := newCafeteriaPreparer(nil, jsonClient(body), Config{})
+	img, err := p.searchImageQuery(context.Background(), "chicken breast salad")
+	if err != nil || img.URL != "https://example.org/first.jpg" {
+		t.Fatalf("image=%+v err=%v", img, err)
 	}
 }
 

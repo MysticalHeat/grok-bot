@@ -12,9 +12,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"telegram-gemini-bot/internal/llm"
 )
@@ -226,6 +228,7 @@ func (p *cafeteriaPreparer) getJSON(ctx context.Context, base string, params url
 
 type wikiPage struct {
 	Title     string `json:"title"`
+	Index     int    `json:"index"`
 	FullURL   string `json:"fullurl"`
 	Extract   string `json:"extract"`
 	Missing   bool   `json:"missing"`
@@ -281,22 +284,61 @@ func (p *cafeteriaPreparer) searchImage(ctx context.Context, name string) (cafet
 	}
 	// Menu names often append a sauce after an asterisk; search the dish itself.
 	if dish, _, ok := strings.Cut(name, "*"); ok && strings.TrimSpace(dish) != "" {
-		return p.searchImageQuery(ctx, strings.TrimSpace(dish))
+		image, err = p.searchImageQuery(ctx, strings.TrimSpace(dish))
+		if err != nil || image.Status != "not_found" {
+			return image, err
+		}
+	}
+	if p.model != nil {
+		query, err := p.imageSearchTranslation(ctx, name)
+		if err != nil {
+			return cafeteriaImage{}, err
+		}
+		if query != "" && !strings.EqualFold(query, name) {
+			return p.searchImageQuery(ctx, query)
+		}
 	}
 	return image, nil
 }
 
+func (p *cafeteriaPreparer) imageSearchTranslation(ctx context.Context, name string) (string, error) {
+	schema := &llm.Schema{Type: "object", Required: []string{"query"}, Properties: map[string]*llm.Schema{"query": {Type: "string"}}}
+	input, _ := json.Marshal(name)
+	instruction := `Create a short English Wikimedia Commons image search query for this Korean cafeteria dish. Use an accurate, recognizable dish or food name, retaining key ingredients and cooking method. Ignore accompanying sauces. For a branded item use its recognizable food type. If the dish is unclear, return an empty query instead of guessing. Return JSON with a query field. Dish: `
+	result, err := p.model.Generate(ctx, llm.Request{Model: p.config.CafeteriaModel, ResponseSchema: schema, Contents: []llm.Content{{Role: "user", Parts: []llm.Part{{Text: instruction + string(input)}}}}})
+	if err != nil {
+		return "", fmt.Errorf("image search translation: %w", err)
+	}
+	var data struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(result.Text), &data); err != nil {
+		return "", fmt.Errorf("image search translation JSON: %w", err)
+	}
+	query := strings.TrimSpace(data.Query)
+	if len([]rune(query)) > 100 || len(strings.Fields(query)) > 8 {
+		return "", errors.New("image search translation too long")
+	}
+	for _, r := range query {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsSpace(r) && r != '-' {
+			return "", errors.New("image search translation contains unsupported characters")
+		}
+	}
+	return query, nil
+}
+
 func (p *cafeteriaPreparer) searchImageQuery(ctx context.Context, name string) (cafeteriaImage, error) {
 	var data wikiResponse
-	params := url.Values{"action": {"query"}, "format": {"json"}, "formatversion": {"2"}, "generator": {"search"}, "gsrsearch": {name}, "gsrnamespace": {"6"}, "gsrlimit": {"5"}, "prop": {"imageinfo"}, "iiprop": {"url|extmetadata|mime"}}
+	params := url.Values{"action": {"query"}, "format": {"json"}, "formatversion": {"2"}, "generator": {"search"}, "gsrsearch": {name + " filetype:bitmap"}, "gsrnamespace": {"6"}, "gsrlimit": {"10"}, "prop": {"imageinfo"}, "iiprop": {"url|extmetadata|mime"}}
 	if err := p.getJSON(ctx, "https://commons.wikimedia.org/w/api.php", params, &data); err != nil {
 		return cafeteriaImage{}, err
 	}
 	if data.Error != nil {
 		return cafeteriaImage{}, errors.New(data.Error.Info)
 	}
+	sort.SliceStable(data.Query.Pages, func(i, j int) bool { return data.Query.Pages[i].Index < data.Query.Pages[j].Index })
 	for _, page := range data.Query.Pages {
-		if len(page.ImageInfo) == 0 {
+		if len(page.ImageInfo) == 0 || !imageTitleMatchesQuery(page.Title, name) {
 			continue
 		}
 		info := page.ImageInfo[0]
@@ -306,6 +348,21 @@ func (p *cafeteriaPreparer) searchImageQuery(ctx context.Context, name string) (
 		return cafeteriaImage{URL: info.URL, SourceURL: info.DescriptionURL, Author: info.Metadata.Artist.Value, License: info.Metadata.LicenseShortName.Value, LicenseURL: info.Metadata.LicenseURL.Value, Caption: page.Title, Status: "needs_review"}, nil
 	}
 	return cafeteriaImage{Status: "not_found"}, nil
+}
+
+// Commons also searches file descriptions, which can return unrelated photos.
+func imageTitleMatchesQuery(title, query string) bool {
+	title = strings.ToLower(title)
+	words := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	if len(words) == 0 {
+		return false
+	}
+	for _, word := range words {
+		if !strings.Contains(title, word) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *cafeteriaPreparer) reference(ctx context.Context, name string) (string, string, bool, error) {
