@@ -44,7 +44,6 @@
     title.append(element('div', dish.translated_name || dish.name, 'dish-title'));
     if (dish.translated_name) title.append(element('div', dish.name, 'original'));
     if (dish.short_description) title.append(element('div', dish.short_description, 'description'));
-    if (dish.course) title.append(element('div', dish.course, 'note'));
     card.append(title);
     card.addEventListener('click', () => openDish(dish));
     return card;
@@ -91,10 +90,23 @@
     mealsElement.replaceChildren();
     const order = ['BREAKFAST', 'LUNCH', 'DINNER'];
     const labels = { BREAKFAST: 'Завтрак', LUNCH: 'Обед', DINNER: 'Ужин' };
-    const keys = Object.keys(data.meals).sort((a, b) => (order.indexOf(a) < 0 ? 3 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 3 : order.indexOf(b)) || a.localeCompare(b));
+    const keys = Object.keys(data.meals).filter(key => data.meals[key].some(dish => dish.kind !== 'notice')).sort((a, b) => (order.indexOf(a) < 0 ? 3 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 3 : order.indexOf(b)) || a.localeCompare(b));
     for (const key of keys) {
       const section = element('section'); section.append(element('h2', labels[key] || key));
-      data.meals[key].forEach(dish => section.append(dishCard(dish)));
+      const groups = new Map();
+      for (const dish of data.meals[key]) {
+        if (dish.kind === 'notice') continue;
+        const course = (dish.course || '').trim();
+        if (!groups.has(course)) groups.set(course, []);
+        groups.get(course).push(dish);
+      }
+      const courses = [...groups.keys()].sort((a, b) => !a ? 1 : !b ? -1 : a.localeCompare(b));
+      for (const course of courses) {
+        const group = element('div', '', 'course-group');
+        group.append(element('h3', course ? 'Группа ' + course : 'Без группы'));
+        groups.get(course).forEach(dish => group.append(dishCard(dish)));
+        section.append(group);
+      }
       mealsElement.append(section);
     }
     status.textContent = keys.length ? '' : 'На эту дату меню пока нет.';

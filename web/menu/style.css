@@ -13,6 +13,8 @@ button.today { min-height: 24px; padding: 2px 8px; margin-top: 4px; background: 
 .status:empty { display: none; }
 section { margin-top: 24px; }
 h2 { font-size: 20px; margin: 0 0 12px; }
+.course-group { margin-top: 18px; }
+.course-group h3 { font-size: 15px; margin: 0 0 10px; color: var(--tg-theme-hint-color, #77808d); }
 .dish-card { width: 100%; display: flex; gap: 12px; align-items: center; padding: 13px; margin-bottom: 10px; text-align: left; color: inherit; background: var(--tg-theme-bg-color, #fff); border-radius: 16px; }
 .dish-card::after { content: '›'; margin-left: auto; font-size: 24px; color: var(--tg-theme-hint-color, #77808d); }
 .dish-card:focus-visible, .dialog-close:focus-visible { outline: 3px solid var(--tg-theme-button-color, #5188e8); outline-offset: 2px; }
