@@ -11,6 +11,7 @@ EnvironmentFile=/opt/telegram-gemini-bot/.env
 Environment=SQLITE_PATH=/var/lib/telegram-gemini-bot/bot.db
 Restart=always
 RestartSec=5
+TimeoutStopSec=150
 User=telegrambot
 Group=telegrambot
 

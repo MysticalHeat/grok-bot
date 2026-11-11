@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net/http"
@@ -16,6 +17,123 @@ type queuedImageModel struct {
 	responses []string
 	calls     int
 	cost      *float64
+}
+
+type blockingImageModel struct{ started, release chan struct{} }
+
+func (m *blockingImageModel) Generate(ctx context.Context, _ llm.Request) (llm.Response, error) {
+	close(m.started)
+	select {
+	case <-ctx.Done():
+		return llm.Response{}, ctx.Err()
+	case <-m.release:
+		cost := 0.001
+		return llm.Response{Text: `{"canonical_name":"","features":"","search_query":""}`, Usage: &llm.Usage{Cost: &cost}}, nil
+	}
+}
+
+func TestImageJobFinishesAfterGracefulCancellation(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	if err := s.saveCafeteriaWeek(context.Background(), []CafeteriaWeeklyPlan{{Date: "2026-11-12", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 1, MenuName: "rice"}}}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE cafeteria_jobs SET status='done' WHERE kind='card'`); err != nil {
+		t.Fatal(err)
+	}
+	model := &blockingImageModel{started: make(chan struct{}), release: make(chan struct{})}
+	p := newCafeteriaPreparer(s, nil, Config{CafeteriaModel: "test"})
+	p.model = model
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.drain(ctx); close(done) }()
+	select {
+	case <-model.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model not started")
+	}
+	cancel()
+	close(model.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+	var state string
+	var cost sql.NullFloat64
+	if err := s.db.QueryRow(`SELECT state,cost_usd FROM cafeteria_image_spend`).Scan(&state, &cost); err != nil || state != "completed" || !cost.Valid {
+		t.Fatalf("state=%s cost=%v err=%v", state, cost, err)
+	}
+	var status, lastError string
+	if err := s.db.QueryRow(`SELECT status,last_error FROM cafeteria_jobs WHERE kind='image'`).Scan(&status, &lastError); err != nil || status != "pending" || lastError != "" {
+		t.Fatalf("status=%s error=%s err=%v", status, lastError, err)
+	}
+}
+
+func TestRecoverStaleReservationAccountsForFullReserve(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.saveCafeteriaWeek(ctx, []CafeteriaWeeklyPlan{{Date: "2026-11-12", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 1, MenuName: "rice"}}}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	var dishID int64
+	if err := s.db.QueryRow(`SELECT id FROM cafeteria_dishes`).Scan(&dishID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO cafeteria_image_spend(dish_id,purpose,state,reserved_usd,updated_at) VALUES(?,'vision','reserved',0.10,?),(?,'vision','reserved',0.10,?),(?,'vision','overrun',0.10,?)`, dishID, now.Add(-7*time.Minute).Unix(), dishID, now.Unix(), dishID, now.Add(-7*time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE cafeteria_jobs SET status='pending',available_at=?,last_error=? WHERE kind='image'`, now.Add(6*time.Hour).Unix(), errImageBudgetBlocked.Error()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recoverImageReservations(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT state,cost_usd FROM cafeteria_image_spend ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var states []string
+	for rows.Next() {
+		var state string
+		var cost sql.NullFloat64
+		if err := rows.Scan(&state, &cost); err != nil {
+			t.Fatal(err)
+		}
+		if cost.Valid {
+			t.Fatal("estimated cost must remain unknown")
+		}
+		states = append(states, state)
+	}
+	rows.Close()
+	if strings.Join(states, ",") != "estimated,reserved,overrun" {
+		t.Fatalf("states=%v", states)
+	}
+	var available int64
+	if err := s.db.QueryRow(`SELECT available_at FROM cafeteria_jobs WHERE kind='image'`).Scan(&available); err != nil || available != now.Unix() {
+		t.Fatalf("available=%d err=%v", available, err)
+	}
+}
+
+func TestEstimatedReservationCountsAgainstBudgetAndAllowsNextRequest(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.db.Exec(`INSERT INTO cafeteria_image_spend(dish_id,purpose,state,reserved_usd,updated_at) VALUES(1,'vision','estimated',0.10,0)`); err != nil {
+		t.Fatal(err)
+	}
+	cost := 0.002
+	model := &queuedImageModel{responses: []string{`{}`}, cost: &cost}
+	p := newCafeteriaPreparer(s, nil, Config{})
+	p.model = model
+	if _, err := p.paidImageGenerate(ctx, 1, "vision", llm.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	var accounted float64
+	if err := s.db.QueryRow(`SELECT sum(COALESCE(cost_usd,reserved_usd)) FROM cafeteria_image_spend`).Scan(&accounted); err != nil || accounted < 0.1019 || accounted > 0.1021 {
+		t.Fatalf("accounted=%f err=%v", accounted, err)
+	}
 }
 
 func (m *queuedImageModel) Generate(_ context.Context, _ llm.Request) (llm.Response, error) {

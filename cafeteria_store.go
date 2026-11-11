@@ -213,6 +213,39 @@ func (s *SQLiteStore) finishCafeteriaJob(ctx context.Context, j *cafeteriaJob, r
 	return err
 }
 
+// An interrupted request has no reliable actual cost. Keep its full reserve
+// in the budget, but stop treating it as in flight after its deadline and a
+// grace period. Pilot requests have a longer overall deadline.
+func (s *SQLiteStore) recoverImageReservations(ctx context.Context, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE cafeteria_image_spend SET state='estimated' WHERE state='reserved' AND updated_at<=?`, now.Add(-6*time.Minute).Unix())
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE cafeteria_image_pilot SET state='estimated' WHERE state='reserved' AND updated_at<=?`, now.Add(-20*time.Minute).Unix())
+	if err != nil {
+		return err
+	}
+	pilotCount, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count+pilotCount > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE cafeteria_jobs SET available_at=?,updated_at=? WHERE kind='image' AND status='pending' AND last_error LIKE 'image budget exhausted or request cost unknown%'`, now.Unix(), now.Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) enqueueReferenceRetry(ctx context.Context, dishID int64) error {
 	now := time.Now()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO cafeteria_jobs(dish_id,kind,available_at,updated_at) VALUES(?,'reference',?,?) ON CONFLICT(dish_id,kind) DO UPDATE SET status='pending',available_at=excluded.available_at,updated_at=excluded.updated_at WHERE cafeteria_jobs.status='done'`, dishID, now.Add(7*24*time.Hour).Unix(), now.Unix())

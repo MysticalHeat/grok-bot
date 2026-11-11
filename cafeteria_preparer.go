@@ -90,6 +90,9 @@ func (p *cafeteriaPreparer) run(ctx context.Context) {
 	defer retryTicker.Stop()
 	p.refresh(ctx)
 	for ctx.Err() == nil {
+		if err := p.store.recoverImageReservations(ctx, time.Now()); err != nil {
+			log.Printf("cafeteria image reservation recovery: %v", err)
+		}
 		p.drain(ctx)
 		select {
 		case <-ctx.Done():
@@ -119,12 +122,11 @@ func (p *cafeteriaPreparer) drain(ctx context.Context) {
 		if job == nil {
 			return
 		}
-		jobCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		// Finish a claimed job during a graceful shutdown so a paid request can
+		// record its cost before the process exits. The deadline remains bounded.
+		jobCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		retry, err := p.process(jobCtx, job)
 		cancel()
-		if ctx.Err() != nil {
-			return
-		} // Expired leases are reclaimed on restart.
 		if err != nil {
 			log.Printf("cafeteria job %d (%s): %v", job.ID, job.Kind, err)
 			shift := job.Attempts - 1
@@ -139,7 +141,10 @@ func (p *cafeteriaPreparer) drain(ctx context.Context) {
 				retry = 6 * time.Hour
 			}
 		}
-		if finishErr := p.store.finishCafeteriaJob(ctx, job, retry, err); finishErr != nil {
+		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		finishErr := p.store.finishCafeteriaJob(finishCtx, job, retry, err)
+		finishCancel()
+		if finishErr != nil {
 			log.Printf("cafeteria finish job: %v", finishErr)
 			return
 		}

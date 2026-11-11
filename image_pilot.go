@@ -153,7 +153,7 @@ func reservePilotRequest(ctx context.Context, store *SQLiteStore, c pilotCandida
 	var spent float64
 	var uncertain, count int
 	err = tx.QueryRowContext(ctx, `SELECT (SELECT COALESCE(SUM(COALESCE(cost_usd,reserved_usd)),0) FROM cafeteria_image_pilot) + (SELECT COALESCE(SUM(COALESCE(cost_usd,reserved_usd)),0) FROM cafeteria_image_spend),
-		(SELECT count(*) FROM cafeteria_image_pilot WHERE state<>'completed') + (SELECT count(*) FROM cafeteria_image_spend WHERE state<>'completed'),
+		(SELECT count(*) FROM cafeteria_image_pilot WHERE state NOT IN ('completed','estimated')) + (SELECT count(*) FROM cafeteria_image_spend WHERE state NOT IN ('completed','estimated')),
 		(SELECT count(*) FROM cafeteria_image_pilot WHERE prompt_version=?)`, pilotVersion).Scan(&spent, &uncertain, &count)
 	if err != nil {
 		return 0, err

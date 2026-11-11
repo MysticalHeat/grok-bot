@@ -40,8 +40,8 @@ func (p *cafeteriaPreparer) paidImageGenerate(ctx context.Context, dishID int64,
 	err = tx.QueryRowContext(ctx, `SELECT
 		(SELECT COALESCE(SUM(COALESCE(cost_usd,reserved_usd)),0) FROM cafeteria_image_spend) +
 		(SELECT COALESCE(SUM(COALESCE(cost_usd,reserved_usd)),0) FROM cafeteria_image_pilot),
-		(SELECT count(*) FROM cafeteria_image_spend WHERE state<>'completed') +
-		(SELECT count(*) FROM cafeteria_image_pilot WHERE state<>'completed')`).Scan(&spent, &uncertain)
+		(SELECT count(*) FROM cafeteria_image_spend WHERE state NOT IN ('completed','estimated')) +
+		(SELECT count(*) FROM cafeteria_image_pilot WHERE state NOT IN ('completed','estimated'))`).Scan(&spent, &uncertain)
 	if err != nil {
 		tx.Rollback()
 		return llm.Response{}, err
