@@ -7,6 +7,9 @@ h1 { margin: 2px 0; font-size: 32px; }
 .eyebrow { color: var(--tg-theme-hint-color, #77808d); font-size: 11px; letter-spacing: .14em; font-weight: 700; margin: 0; }
 .date-nav { display: flex; align-items: center; justify-content: space-between; text-align: center; gap: 8px; padding: 12px; border-radius: 18px; background: var(--tg-theme-bg-color, #fff); }
 button { font: inherit; cursor: pointer; color: var(--tg-theme-button-text-color, #fff); background: var(--tg-theme-button-color, #5188e8); border: 0; border-radius: 12px; min-width: 42px; min-height: 42px; }
+.date-arrow { display: grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border-radius: 14px; transition: transform .15s ease, opacity .15s ease; }
+.date-arrow svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.25; stroke-linecap: round; stroke-linejoin: round; }
+.date-arrow:active { transform: scale(.92); opacity: .8; }
 .date-nav strong { display: block; text-transform: capitalize; }
 button.today { min-height: 24px; padding: 2px 8px; margin-top: 4px; background: transparent; color: var(--tg-theme-link-color, #5188e8); font-size: 13px; }
 .status { text-align: center; color: var(--tg-theme-hint-color, #77808d); margin: 30px 0; }
@@ -16,8 +19,8 @@ h2 { font-size: 20px; margin: 0 0 12px; }
 .course-group { margin-top: 18px; }
 .course-group h3 { font-size: 15px; margin: 0 0 10px; color: var(--tg-theme-hint-color, #77808d); }
 .dish-card { width: 100%; display: flex; gap: 12px; align-items: center; padding: 13px; margin-bottom: 10px; text-align: left; color: inherit; background: var(--tg-theme-bg-color, #fff); border-radius: 16px; }
-.dish-card::after { content: '›'; margin-left: auto; font-size: 24px; color: var(--tg-theme-hint-color, #77808d); }
-.dish-card:focus-visible, .dialog-close:focus-visible { outline: 3px solid var(--tg-theme-button-color, #5188e8); outline-offset: 2px; }
+.dish-card::after { content: ''; flex: none; width: 8px; height: 8px; margin: 0 4px 0 auto; border-top: 2px solid var(--tg-theme-hint-color, #77808d); border-right: 2px solid var(--tg-theme-hint-color, #77808d); transform: rotate(45deg); }
+.date-arrow:focus-visible, .dish-card:focus-visible, .dialog-close:focus-visible { outline: 3px solid var(--tg-theme-button-color, #5188e8); outline-offset: 2px; }
 .thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; flex: none; }
 .dish-title { font-weight: 650; }
 .original, .description, .note { color: var(--tg-theme-hint-color, #77808d); font-size: 13px; margin-top: 4px; }
@@ -30,3 +33,4 @@ dialog::backdrop { background: rgb(0 0 0 / 60%); }
 .dialog-close { position: sticky; top: 12px; float: right; margin: 12px 12px -54px 0; z-index: 1; min-width: 42px; min-height: 42px; font-size: 26px; line-height: 1; background: var(--tg-theme-secondary-bg-color, #f3f5f7); color: var(--tg-theme-text-color, #20232a); }
 a { color: var(--tg-theme-link-color, #5188e8); }
 @media (prefers-color-scheme: dark) { :root { background: var(--tg-theme-secondary-bg-color, #17212b); color: var(--tg-theme-text-color, #fff); } .date-nav, .dish-card, dialog { background: var(--tg-theme-bg-color, #242f3d); } .dialog-close { background: var(--tg-theme-secondary-bg-color, #17212b); color: var(--tg-theme-text-color, #fff); } }
+@media (prefers-reduced-motion: reduce) { .date-arrow { transition: none; } }
