@@ -62,3 +62,9 @@ jobs:
             ARGS+=(--credentials-file /tmp/grok-bot/service-account.json)
           fi
           deploy/deploy.sh "${ARGS[@]}"
+
+      - name: Notify Telegram
+        continue-on-error: true
+        env:
+          TELEGRAM_NOTIFY_CHAT_ID: ${{ vars.TELEGRAM_NOTIFY_CHAT_ID }}
+        run: go run ./deploy/notify
