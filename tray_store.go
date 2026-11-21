@@ -17,7 +17,10 @@ import (
 	"telegram-gemini-bot/internal/llm"
 )
 
-const trayRetention = 30 * 24 * time.Hour
+const (
+	trayRetention = 30 * 24 * time.Hour
+	trayMealLimit = 3
+)
 
 type trayPhotos struct {
 	uploadSlots chan struct{}
@@ -66,6 +69,7 @@ const trayColumns = "id,service_date,meal,status,reason,result"
 var (
 	errTrayDuplicate = errors.New("this file was already submitted for this meal")
 	errTrayQuota     = errors.New("daily frame limit reached")
+	errTrayMealLimit = errors.New("shared meal frame limit reached")
 	errTrayMenu      = errors.New("meal does not have dishes")
 	errTrayConflict  = errors.New("menu, photo or submission changed; reload and review")
 	errTrayCrop      = errors.New("invalid or duplicate crop")
@@ -140,15 +144,20 @@ func (p *trayPhotos) upload(ctx context.Context, user int64, date, meal, digest 
 		return traySummary{}, err
 	}
 	defer tx.Rollback()
-	var exists, count int
+	// Check both quotas on the same SQLite connection and transaction as the insert.
+	var exists, userCount, mealCount int
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tray_submissions WHERE service_date=? AND meal=? AND digest=?),
-		(SELECT COUNT(*) FROM tray_submissions WHERE user_id=? AND upload_day=?)`, date, meal, digest, user, day).Scan(&exists, &count)
+		(SELECT COUNT(*) FROM tray_submissions WHERE user_id=? AND upload_day=?),
+		(SELECT COUNT(*) FROM tray_submissions WHERE service_date=? AND meal=?)`,
+		date, meal, digest, user, day, date, meal).Scan(&exists, &userCount, &mealCount)
 	switch {
 	case err != nil:
 		return traySummary{}, err
 	case exists != 0:
 		return traySummary{}, errTrayDuplicate
-	case count >= 3:
+	case mealCount >= trayMealLimit:
+		return traySummary{}, errTrayMealLimit
+	case userCount >= 3:
 		return traySummary{}, errTrayQuota
 	}
 	dishes, err := trayMenuDishes(ctx, tx, date, meal)

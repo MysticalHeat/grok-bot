@@ -115,3 +115,79 @@ func TestTrayLifecycle(t *testing.T) {
 	}
 	req("GET", menu()[1].ImageURL, 0, nil, 200)
 }
+
+func TestTrayGlobalMealQuota(t *testing.T) {
+	store := testStore(t)
+	now := time.Now()
+	const date, nextDate = "2026-11-21", "2026-11-22"
+	meals := map[string][]CafeteriaMenu{
+		"LUNCH": {{MenuID: 1, MenuName: "Рис"}}, "DINNER": {{MenuID: 2, MenuName: "Суп"}},
+	}
+	if err := store.saveCafeteriaWeek(context.Background(), []CafeteriaWeeklyPlan{
+		{Date: date, MenusByMealType: meals}, {Date: nextDate, MenusByMealType: meals},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	p := &trayPhotos{store: store, frames: t.TempDir(), now: func() time.Time { return now }}
+	h := newMenuHandler(store, "token", p)
+	var frame bytes.Buffer
+	if err := png.Encode(&frame, image.NewRGBA(image.Rect(0, 0, 12, 8))); err != nil {
+		t.Fatal(err)
+	}
+	upload := func(date, meal string, user int64, suffix byte) *httptest.ResponseRecorder {
+		body := append(bytes.Clone(frame.Bytes()), suffix)
+		r := httptest.NewRequest(http.MethodPost, "/api/tray?date="+date+"&meal="+meal, bytes.NewReader(body))
+		r.Header.Set("X-Telegram-Init-Data", signedInitDataForUser("token", now, user))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	check := func(w *httptest.ResponseRecorder, want int) {
+		t.Helper()
+		if w.Code != want {
+			t.Fatalf("upload: got %d want %d: %s", w.Code, want, w.Body)
+		}
+	}
+	first := upload(date, "LUNCH", 1, 1)
+	check(first, http.StatusCreated)
+	var sub traySummary
+	if err := json.Unmarshal(first.Body.Bytes(), &sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.decide(context.Background(), sub.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	check(upload(date, "LUNCH", 2, 1), http.StatusConflict)
+
+	// The two remaining places are shared among concurrent uploads from different users.
+	const attempts = 5
+	results := make(chan *httptest.ResponseRecorder, attempts)
+	for i := byte(2); i < 2+attempts; i++ {
+		go func() { results <- upload(date, "LUNCH", int64(i), i) }()
+	}
+	accepted := 0
+	for range attempts {
+		w := <-results
+		if w.Code == http.StatusCreated {
+			accepted++
+			continue
+		}
+		check(w, http.StatusTooManyRequests)
+		var outcome struct{ Code string }
+		if err := json.Unmarshal(w.Body.Bytes(), &outcome); err != nil || outcome.Code != "meal_photo_limit" {
+			t.Fatalf("expected the shared meal limit, got %s (%v)", w.Body, err)
+		}
+	}
+	if accepted != 2 {
+		t.Fatalf("accepted %d concurrent uploads; want 2", accepted)
+	}
+
+	check(upload(date, "DINNER", 1, 7), http.StatusCreated)
+	check(upload(nextDate, "LUNCH", 1, 8), http.StatusCreated)
+	daily := upload(nextDate, "DINNER", 1, 9)
+	check(daily, http.StatusTooManyRequests)
+	if daily.Body.String() != "daily frame limit reached\n" {
+		t.Fatalf("expected the personal daily limit, got %s", daily.Body)
+	}
+	check(upload(nextDate, "DINNER", 2, 9), http.StatusCreated)
+}
