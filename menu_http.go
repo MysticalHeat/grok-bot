@@ -21,6 +21,9 @@ import (
 var menuAssets embed.FS
 
 type menuDish struct {
+	ID               int64    `json:"id"`
+	PhotoID          string   `json:"photo_id,omitempty"`
+	ImageKind        string   `json:"image_kind,omitempty"`
 	Name             string   `json:"name"`
 	Kind             string   `json:"kind"`
 	Course           string   `json:"course"`
@@ -39,13 +42,14 @@ type menuDish struct {
 }
 
 func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string][]menuDish, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.meal_type, d.name, d.kind, s.course,
+	rows, err := s.db.QueryContext(ctx, `SELECT s.meal_type, d.id,COALESCE(p.photo_id,''),d.name, d.kind, s.course,
 		COALESCE(c.translated_name,''), COALESCE(c.short_description,''), COALESCE(c.description,''),
 		COALESCE(c.typical_ingredients,'[]'), COALESCE(c.sources,'[]'), COALESCE(c.needs_review,1),
 		COALESCE(i.image_url,''), COALESCE(i.source_url,''), COALESCE(i.author,''),
 		COALESCE(i.license,''), COALESCE(i.license_url,''), COALESCE(i.status,'')
 		FROM cafeteria_schedule s JOIN cafeteria_dishes d ON d.id=s.dish_id
 		LEFT JOIN cafeteria_cards c ON c.dish_id=d.id LEFT JOIN cafeteria_images i ON i.dish_id=d.id AND i.status='approved'
+		LEFT JOIN tray_published p ON p.dish_id=d.id
 		WHERE s.service_date=? ORDER BY s.meal_type,s.position`, date)
 	if err != nil {
 		return nil, err
@@ -55,7 +59,7 @@ func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string]
 	for rows.Next() {
 		var meal, ingredients, sources string
 		var d menuDish
-		if err := rows.Scan(&meal, &d.Name, &d.Kind, &d.Course, &d.TranslatedName, &d.ShortDescription,
+		if err := rows.Scan(&meal, &d.ID, &d.PhotoID, &d.Name, &d.Kind, &d.Course, &d.TranslatedName, &d.ShortDescription,
 			&d.Description, &ingredients, &sources, &d.NeedsReview, &d.ImageURL, &d.ImageSource,
 			&d.ImageAuthor, &d.ImageLicense, &d.ImageLicenseURL, &d.ImageStatus); err != nil {
 			return nil, err
@@ -69,21 +73,25 @@ func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string]
 
 // validTelegramInitData authenticates the entire query string, not initDataUnsafe.
 func validTelegramInitData(raw, token string, now time.Time) bool {
+	return telegramUserID(raw, token, now) != 0
+}
+
+func telegramUserID(raw, token string, now time.Time) int64 {
 	if len(raw) == 0 || len(raw) > 16384 || token == "" {
-		return false
+		return 0
 	}
 	values, err := url.ParseQuery(raw)
 	if err != nil {
-		return false
+		return 0
 	}
 	for _, v := range values {
 		if len(v) != 1 {
-			return false
+			return 0
 		}
 	}
 	hash, err := hex.DecodeString(values.Get("hash"))
 	if err != nil || len(hash) != sha256.Size {
-		return false
+		return 0
 	}
 	values.Del("hash")
 	keys := make([]string, 0, len(values))
@@ -100,24 +108,34 @@ func validTelegramInitData(raw, token string, now time.Time) bool {
 	mac := hmac.New(sha256.New, secret.Sum(nil))
 	_, _ = mac.Write([]byte(strings.Join(fields, "\n")))
 	if !hmac.Equal(hash, mac.Sum(nil)) {
-		return false
+		return 0
 	}
 	stamp, err := strconv.ParseInt(values.Get("auth_date"), 10, 64)
 	if err != nil || stamp > now.Unix()+30 || stamp < now.Add(-24*time.Hour).Unix() {
-		return false
+		return 0
 	}
 	var user struct {
 		ID int64 `json:"id"`
 	}
-	return json.Unmarshal([]byte(values.Get("user")), &user) == nil && user.ID > 0
+	if json.Unmarshal([]byte(values.Get("user")), &user) != nil || user.ID <= 0 {
+		return 0
+	}
+	return user.ID
 }
 
-func newMenuHandler(store *SQLiteStore, token string) http.Handler {
+func newMenuHandler(store *SQLiteStore, token string, photoOptions ...*trayPhotos) http.Handler {
 	assets, err := fs.Sub(menuAssets, "web/menu")
 	if err != nil {
 		panic(err)
 	}
 	mux := http.NewServeMux()
+	var photos *trayPhotos
+	if len(photoOptions) > 0 {
+		photos = photoOptions[0]
+	}
+	if photos != nil {
+		photos.register(mux, token)
+	}
 	mux.HandleFunc("/api/menu", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodGet {
@@ -126,7 +144,11 @@ func newMenuHandler(store *SQLiteStore, token string) http.Handler {
 			return
 		}
 		now := time.Now()
-		if !validTelegramInitData(r.Header.Get("X-Telegram-Init-Data"), token, now) {
+		if photos != nil {
+			now = photos.now()
+		}
+		user := telegramUserID(r.Header.Get("X-Telegram-Init-Data"), token, now)
+		if user == 0 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -146,12 +168,27 @@ func newMenuHandler(store *SQLiteStore, token string) http.Handler {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(struct {
-			Date  string                `json:"date"`
-			Today string                `json:"today"`
-			Meals map[string][]menuDish `json:"meals"`
-		}{date, today, meals})
+		for _, dishes := range meals {
+			for i := range dishes {
+				d := &dishes[i]
+				if photos == nil {
+					d.PhotoID = ""
+					continue
+				}
+				if d.PhotoID != "" {
+					d.ImageURL, d.ImageKind, d.ImageStatus = "/api/tray-photo/"+d.PhotoID, "cafeteria", "approved"
+					d.ImageSource, d.ImageAuthor, d.ImageLicense, d.ImageLicenseURL = "", "", "", ""
+				}
+			}
+		}
+		trayJSON(w, 200, struct {
+			Date           string                `json:"date"`
+			Today          string                `json:"today"`
+			Meals          map[string][]menuDish `json:"meals"`
+			PhotosEnabled  bool                  `json:"photos_enabled"`
+			PhotoAIEnabled bool                  `json:"photo_ai_enabled"`
+			PhotoAdmin     bool                  `json:"photo_admin"`
+		}{date, today, meals, photos != nil, photos != nil && photos.ai != nil, photos != nil && photos.admins[user]})
 	})
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	return mux

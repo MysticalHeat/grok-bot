@@ -158,7 +158,9 @@ func main() {
 		log.Fatalf("create llm client: %v", err)
 	}
 
-	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	bot, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, tgbotapi.APIEndpoint, &http.Client{
+		Timeout: time.Duration(max(20, cfg.PollTimeoutSec+10)) * time.Second,
+	})
 	if err != nil {
 		log.Fatalf("create telegram bot: %v", err)
 	}
@@ -175,11 +177,21 @@ func main() {
 		started: time.Now(),
 	}
 	if cfg.MenuListenAddr != "" {
+		photos, err := configureTrayPhotos(ctx, cfg, store, bot)
+		if err != nil {
+			log.Fatalf("tray photos: %v", err)
+		}
+		if photos != nil {
+			workerCtx, cancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() { defer close(done); photos.run(workerCtx) }()
+			defer func() { cancel(); <-done }()
+		}
 		listener, err := net.Listen("tcp", cfg.MenuListenAddr)
 		if err != nil {
 			log.Fatalf("menu listener: %v", err)
 		}
-		server := &http.Server{Handler: newMenuHandler(store, cfg.TelegramToken), ReadHeaderTimeout: 10 * time.Second}
+		server := &http.Server{Handler: newMenuHandler(store, cfg.TelegramToken, photos), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 45 * time.Second}
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

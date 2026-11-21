@@ -17,7 +17,8 @@
     return node;
   };
   const safeURL = value => {
-    try { const url = new URL(value); return url.protocol === 'https:' ? url.href : ''; } catch { return ''; }
+    if (!value) return '';
+    try { const url = new URL(value, location.href); return url.protocol === 'https:' || url.origin === location.origin ? url.href : ''; } catch { return ''; }
   };
   const link = (label, value) => {
     const href = safeURL(value);
@@ -49,6 +50,7 @@
     title.append(element('div', dish.translated_name || dish.name, 'dish-title'));
     if (dish.translated_name) title.append(element('div', dish.name, 'original'));
     if (dish.short_description) title.append(element('div', dish.short_description, 'description'));
+    if (dish.image_kind === 'cafeteria') title.append(element('div', 'Фото из столовой', 'note'));
     card.append(title);
     card.addEventListener('click', () => openDish(dish));
     return card;
@@ -58,7 +60,7 @@
     const imageURL = dish.image_status !== 'not_found' ? safeURL(dish.image_url) : '';
     if (imageURL) {
       const img = element('img', '', 'dialog-image');
-      img.src = imageURL; img.alt = 'Пример изображения блюда'; img.referrerPolicy = 'no-referrer';
+      img.src = imageURL; img.alt = dish.image_kind === 'cafeteria' ? 'Фото блюда из столовой' : 'Пример изображения блюда'; img.referrerPolicy = 'no-referrer';
       img.onerror = () => img.remove();
       dialogContent.append(img);
     }
@@ -72,7 +74,7 @@
     if (dish.ingredients?.length) content.append(element('p', 'Типичные ингредиенты (не состав столовой): ' + dish.ingredients.join(', ')));
     if (dish.needs_review) content.append(element('p', 'Описание требует проверки.', 'note'));
     if (imageURL) {
-      content.append(element('p', 'Изображение — пример, может не соответствовать блюду в столовой' + (dish.image_status === 'needs_review' ? '; требует проверки.' : '.'), 'note'));
+      content.append(element('p', dish.image_kind === 'cafeteria' ? 'Одобренное фото блюда из столовой.' : 'Изображение — пример, может не соответствовать блюду в столовой' + (dish.image_status === 'needs_review' ? '; требует проверки.' : '.'), 'note'));
       if (dish.image_author) content.append(element('p', 'Автор: ' + dish.image_author, 'note'));
       addLink(content, 'Источник изображения', dish.image_source);
       if (dish.image_license) {
@@ -83,6 +85,7 @@
     (dish.sources || []).forEach((source, i) => addLink(content, 'Источник описания ' + (i + 1), source));
     if (!dish.short_description && !dish.description && !dish.ingredients?.length && !imageURL && !dish.sources?.length) content.append(element('p', 'Подробности пока не подготовлены.', 'note'));
     dialogContent.append(content);
+    window.dispatchEvent(new CustomEvent('menu:dish', { detail: { dish, content } }));
     dialog.showModal();
   }
   document.querySelector('#dish-close').addEventListener('click', () => dialog.close());
@@ -98,6 +101,12 @@
     const keys = Object.keys(data.meals).filter(key => data.meals[key].some(dish => dish.kind !== 'notice')).sort((a, b) => (order.indexOf(a) < 0 ? 3 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 3 : order.indexOf(b)) || a.localeCompare(b));
     for (const key of keys) {
       const section = element('section'); section.append(element('h2', labels[key] || key));
+      if (data.photos_enabled) {
+        const propose = element('button', 'Предложить фото');
+        propose.type = 'button';
+        propose.addEventListener('click', () => window.dispatchEvent(new CustomEvent('menu:propose', { detail: key })));
+        section.append(propose);
+      }
       const groups = new Map();
       for (const dish of data.meals[key]) {
         if (dish.kind === 'notice') continue;
@@ -127,6 +136,7 @@
       const data = await response.json(); date = data.date;
       dateElement.textContent = new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(date + 'T12:00:00Z'));
       render(data);
+      window.dispatchEvent(new CustomEvent('menu:loaded', { detail: data }));
     } catch (error) { if (error.name !== 'AbortError') status.textContent = 'Не удалось загрузить меню. Попробуйте ещё раз.'; }
   }
   function move(days) {
@@ -137,5 +147,6 @@
   document.querySelector('#previous').addEventListener('click', () => move(-1));
   document.querySelector('#next').addEventListener('click', () => move(1));
   document.querySelector('#today').addEventListener('click', () => load(''));
+  window.addEventListener('menu:photo-removed', () => { dialog.close(); load(date); });
   load();
 })();

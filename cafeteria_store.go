@@ -76,7 +76,10 @@ func (s *SQLiteStore) initCafeteria() error {
 			return err
 		}
 	}
-	return s.initVerifiedImages()
+	if err := s.initVerifiedImages(); err != nil {
+		return err
+	}
+	return initTrayPhotos(s)
 }
 
 func (s *SQLiteStore) initVerifiedImages() error {
