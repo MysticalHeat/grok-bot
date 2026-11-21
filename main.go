@@ -62,6 +62,8 @@ type Config struct {
 	CafeteriaInterval   int
 	CafeteriaDaysAhead  int
 	MenuListenAddr      string
+
+	CafeteriaRequireOpenAIBYOK bool
 }
 
 type ChatMessage struct {
@@ -267,6 +269,8 @@ func loadConfig() (Config, error) {
 		CafeteriaInterval:   getEnvAsInt("CAFETERIA_REFRESH_MINUTES", 60),
 		CafeteriaDaysAhead:  getEnvAsInt("CAFETERIA_DAYS_AHEAD", 14),
 		MenuListenAddr:      strings.TrimSpace(os.Getenv("MENU_LISTEN_ADDR")),
+
+		CafeteriaRequireOpenAIBYOK: getEnvAsBool("CAFETERIA_REQUIRE_OPENAI_BYOK", false),
 	}
 	if cfg.CafeteriaInterval <= 0 || cfg.CafeteriaDaysAhead < 0 || cfg.CafeteriaDaysAhead > 90 {
 		return Config{}, errors.New("CAFETERIA_REFRESH_MINUTES must be positive and CAFETERIA_DAYS_AHEAD must be between 0 and 90")
@@ -1550,6 +1554,13 @@ func replaceCaseInsensitive(source, oldValue, newValue string) string {
 
 func llmConfig(cfg Config) llm.Config {
 	return llm.Config{APIKey: cfg.OpenAIAPIKey}
+}
+
+func cafeteriaLLMConfig(cfg Config) llm.Config {
+	return llm.Config{
+		APIKey:            cfg.OpenAIAPIKey,
+		RequireOpenAIBYOK: cfg.CafeteriaRequireOpenAIBYOK,
+	}
 }
 
 func openRouterModel(value string) string {

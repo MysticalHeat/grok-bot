@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	pilotVersion     = "vision-pilot-v1"
+	pilotVersion     = "vision-pilot-v2"
 	pilotBudget      = 5.0
 	pilotReservation = 0.10
 	maxPilotImages   = 10
@@ -51,7 +51,7 @@ func runImagePilotCommand(args []string) error {
 	defer store.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	model, err := llm.NewClient(ctx, llmConfig(cfg))
+	model, err := llm.NewClient(ctx, cafeteriaLLMConfig(cfg))
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (p *cafeteriaPreparer) runImagePilot(ctx context.Context) error {
 		}
 		prompt, _ := json.Marshal(map[string]string{"original_name": candidate.Name, "translated_name": candidate.Translation, "file_title": candidate.Caption})
 		schema := &llm.Schema{Type: "object", Required: []string{"decision", "reason"}, Properties: map[string]*llm.Schema{"decision": {Type: "string"}, "reason": {Type: "string"}}}
-		instruction := `Assess whether this image is a suitable example of the specific cafeteria dish. Compare visible food and the provided title with the dish; reject clear contradictions, such as beans in plain rice or a dry dish for broth. Do not assume ingredients you cannot see. Return JSON: decision must be approve, reject, or review; reason must explain the decision briefly in Russian. Dish data: `
+		instruction := `Assess whether this image is a suitable example of the specific cafeteria dish. ` + imageMainSubjectRule + `Compare visible food and the provided title with the dish; reject clear contradictions, such as beans in plain rice or a dry dish for broth. Do not assume ingredients you cannot see. Return JSON: decision must be approve, reject, or review; reason must explain the decision briefly in Russian. Dish data: `
 		result, err := p.model.Generate(ctx, llm.Request{Model: p.config.CafeteriaModel, MaxTokens: 512, ResponseSchema: schema, Contents: []llm.Content{{Role: "user", Parts: []llm.Part{{Text: instruction + string(prompt)}, {Data: image, MimeType: mime}}}}})
 		if err != nil {
 			return fmt.Errorf("model request for %s: %w; budget reservation retained pending reconciliation", candidate.Name, err)

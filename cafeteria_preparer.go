@@ -71,7 +71,7 @@ func (p *cafeteriaPreparer) refresh(ctx context.Context) {
 
 func (p *cafeteriaPreparer) run(ctx context.Context) {
 	if p.config.OpenAIAPIKey != "" {
-		client, err := llm.NewClient(ctx, llmConfig(p.config))
+		client, err := llm.NewClient(ctx, cafeteriaLLMConfig(p.config))
 		if err != nil {
 			log.Printf("cafeteria OpenRouter client: %v", err)
 		} else {

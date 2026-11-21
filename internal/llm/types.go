@@ -1,7 +1,8 @@
 package llm
 
 type Config struct {
-	APIKey string
+	APIKey            string
+	RequireOpenAIBYOK bool
 }
 
 type Request struct {
