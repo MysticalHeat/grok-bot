@@ -24,7 +24,13 @@
   async function api(path, options = {}) {
     const response = await fetch(path, { ...options, headers: { ...auth, ...options.headers }, cache: 'no-store' });
     if (!response.ok) {
-      const known = { 401: 'Откройте Mini App заново через Telegram-бота.', 403: 'Эта страница доступна только модератору.', 409: options.body instanceof Blob ? 'Этот файл уже предложен для этого приёма пищи.' : 'Данные изменились. Обновите страницу и попробуйте снова.', 429: 'Превышен лимит загрузок. Попробуйте позже.', 415: 'Поддерживаются только JPEG и PNG.', 413: 'Файл слишком большой.' };
+      if (response.status === 429) {
+        const result = await response.json().catch(() => null);
+        throw new Error(result?.code === 'meal_photo_limit'
+          ? 'Для этого приёма пищи уже отправили три фото. Выберите другой приём пищи или дату.'
+          : 'Вы достигли личного лимита загрузок на сегодня.');
+      }
+      const known = { 401: 'Откройте Mini App заново через Telegram-бота.', 403: 'Эта страница доступна только модератору.', 409: options.body instanceof Blob ? 'Этот файл уже предложен для этого приёма пищи.' : 'Данные изменились. Обновите страницу и попробуйте снова.', 415: 'Поддерживаются только JPEG и PNG.', 413: 'Файл слишком большой.' };
       throw new Error(known[response.status] || (await response.text()) || 'Ошибка: ' + response.status);
     }
     return response;
@@ -207,7 +213,7 @@
     if (!menu?.photos_enabled || opener.disabled || root.open) return;
     const { date, meals, photo_ai_enabled } = menu;
     ++detailVersion; revoke(); revokePreview(); content.replaceChildren();
-    content.append(node('p', 'Один снимок подноса поможет дополнить карточки нескольких блюд.', 'tray-intro'));
+    content.append(node('p', 'Один снимок подноса поможет дополнить карточки нескольких блюд. На каждый приём пищи в выбранную дату можно отправить до трёх снимков суммарно от всех пользователей.', 'tray-intro'));
     const form = document.createElement('form'); form.className = 'tray-form';
     const context = node('div', '', 'tray-context');
     const day = node('div', '', 'tray-date');

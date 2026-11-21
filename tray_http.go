@@ -139,6 +139,8 @@ func trayHTTPError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		http.Error(w, "not found", 404)
+	case errors.Is(err, errTrayMealLimit):
+		trayJSON(w, http.StatusTooManyRequests, map[string]string{"code": "meal_photo_limit"})
 	case errors.Is(err, errTrayQuota):
 		http.Error(w, err.Error(), 429)
 	case errors.Is(err, errTrayConflict), errors.Is(err, errTrayDuplicate):
