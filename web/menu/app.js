@@ -101,12 +101,6 @@
     const keys = Object.keys(data.meals).filter(key => data.meals[key].some(dish => dish.kind !== 'notice')).sort((a, b) => (order.indexOf(a) < 0 ? 3 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 3 : order.indexOf(b)) || a.localeCompare(b));
     for (const key of keys) {
       const section = element('section'); section.append(element('h2', labels[key] || key));
-      if (data.photos_enabled) {
-        const propose = element('button', 'Предложить фото');
-        propose.type = 'button';
-        propose.addEventListener('click', () => window.dispatchEvent(new CustomEvent('menu:propose', { detail: key })));
-        section.append(propose);
-      }
       const groups = new Map();
       for (const dish of data.meals[key]) {
         if (dish.kind === 'notice') continue;
@@ -128,6 +122,7 @@
   async function load(value = '') {
     if (!initData) { status.textContent = 'Откройте меню через Telegram-бота.'; return; }
     request?.abort(); request = new AbortController();
+    window.dispatchEvent(new Event('menu:loading'));
     status.textContent = 'Загрузка…'; mealsElement.replaceChildren();
     try {
       const response = await fetch('/api/menu' + (value ? '?date=' + encodeURIComponent(value) : ''), { headers: { 'X-Telegram-Init-Data': initData }, signal: request.signal, cache: 'no-store' });

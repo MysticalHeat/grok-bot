@@ -18,13 +18,17 @@
       <div><strong id="date">Загрузка…</strong><button id="today" class="today">Сегодня</button></div>
       <button id="next" class="date-arrow" type="button" aria-label="Следующий день"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
     </nav>
+    <button id="tray-open" type="button" aria-haspopup="dialog" aria-controls="tray" hidden>Предложить фото</button>
     <p id="status" class="status" role="status" aria-live="polite"></p>
     <div id="meals"></div>
-    <section id="tray" hidden aria-labelledby="tray-title">
+  </main>
+  <dialog id="tray" aria-labelledby="tray-title">
+    <button id="tray-close" class="dialog-close" type="button" aria-label="Закрыть окно фото" autofocus>×</button>
+    <div class="content">
       <h2 id="tray-title">Фото подноса</h2>
       <div id="tray-content"></div>
-    </section>
-  </main>
+    </div>
+  </dialog>
   <dialog id="dish-dialog" aria-labelledby="dish-dialog-title">
     <button id="dish-close" class="dialog-close" type="button" aria-label="Закрыть карточку">×</button>
     <div id="dish-dialog-content"></div>
