@@ -6,7 +6,7 @@
   const auth = { 'X-Telegram-Init-Data': app?.initData || '' };
   const labels = { BREAKFAST: 'Завтрак', LUNCH: 'Обед', DINNER: 'Ужин' };
   const statuses = { queued: 'В очереди', review: 'На проверке', closed: 'Завершено' };
-  let menu, frameURL = '', detailVersion = 0;
+  let menu, frameURL = '', previewURL = '', detailVersion = 0;
   const node = (tag, text, className) => {
     const el = document.createElement(tag);
     if (text) el.textContent = text;
@@ -17,7 +17,9 @@
     const el = node('button', text); el.type = 'button'; el.addEventListener('click', action); return el;
   };
   const revoke = () => { if (frameURL) URL.revokeObjectURL(frameURL); frameURL = ''; };
-  window.addEventListener('pagehide', revoke);
+  const revokePreview = () => { if (previewURL) URL.revokeObjectURL(previewURL); previewURL = ''; };
+  window.addEventListener('pagehide', event => { if (!event.persisted) { revoke(); revokePreview(); } });
+  const dateLabel = date => new Intl.DateTimeFormat('ru-RU', { dateStyle: 'long', timeZone: 'UTC' }).format(new Date(date + 'T12:00:00Z'));
   async function api(path, options = {}) {
     const response = await fetch(path, { ...options, headers: { ...auth, ...options.headers }, cache: 'no-store' });
     if (!response.ok) {
@@ -28,9 +30,10 @@
   }
   const message = (target, error) => { target.textContent = error.message || 'Произошла ошибка.'; };
   function summaryText(item) {
-    return `${item.date} · ${labels[item.meal] || item.meal} · ${statuses[item.status] || item.status}`;
+    return `${dateLabel(item.date)}, ${labels[item.meal] || item.meal} — ${statuses[item.status] || item.status}`;
   }
   async function showDetail(id, target) {
+    if (!root.open || !target.isConnected) return;
     const version = ++detailVersion;
     revoke(); target.replaceChildren(node('p', 'Загрузка…'));
     try {
@@ -125,11 +128,14 @@
   function openTray(deep) {
     if (!menu?.photos_enabled || opener.disabled || root.open) return;
     const { date, meals, photo_ai_enabled, photo_admin } = menu;
-    ++detailVersion; revoke(); content.replaceChildren();
-    content.append(node('p', 'Меню на ' + new Intl.DateTimeFormat('ru-RU', { dateStyle: 'long', timeZone: 'UTC' }).format(new Date(date + 'T12:00:00Z'))));
+    ++detailVersion; revoke(); revokePreview(); content.replaceChildren();
+    content.append(node('p', 'Один снимок подноса поможет дополнить карточки нескольких блюд.', 'tray-intro'));
     const form = document.createElement('form'); form.className = 'tray-form';
-    form.append(node('p', photo_ai_enabled ? 'Фото может быть отправлено ИИ для предложения областей; администратор проверит результат.' : 'Фото проверит администратор вручную; ИИ не используется.', 'note'));
-    const mealLabel = node('label', 'Приём пищи '); const meal = document.createElement('select');
+    const context = node('div', '', 'tray-context');
+    const day = node('div', '', 'tray-date');
+    const time = node('time', dateLabel(date)); time.dateTime = date;
+    day.append(node('span', 'Дата меню'), time);
+    const mealLabel = node('label', 'Приём пищи'); const meal = document.createElement('select');
     for (const key of new Set([...Object.keys(labels), ...Object.keys(meals)])) {
       if (!meals[key]?.some(d => d.kind === 'dish')) continue;
       const option = node('option', labels[key] || key);
@@ -137,14 +143,32 @@
       meal.append(option);
     }
     mealLabel.append(meal);
-    const fileLabel = node('label', 'Фото JPEG или PNG '); const file = document.createElement('input'); file.type = 'file'; file.accept = 'image/jpeg,image/png'; file.required = true; fileLabel.append(file);
-    const upload = node('button', 'Отправить фото'); upload.type = 'submit'; const uploadStatus = node('p', '', 'tray-error'); uploadStatus.setAttribute('role', 'status');
-    form.append(mealLabel, fileLabel, upload, uploadStatus); content.append(form);
+    context.append(day, mealLabel);
+    const file = document.createElement('input'); file.type = 'file'; file.accept = 'image/jpeg,image/png'; file.required = true;
+    const preview = node('img', '', 'tray-preview'); preview.alt = 'Предпросмотр снимка подноса'; preview.hidden = true;
+    const picker = node('label', '', 'tray-picker');
+    const pickTitle = node('span', 'Выбрать снимок', 'tray-pick-title');
+    const hint = node('span', 'JPEG или PNG, до 8 МБ', 'tray-file-hint');
+    picker.append(file, preview, pickTitle, hint);
+    const privacy = node('p', photo_ai_enabled ? 'Снимок может быть отправлен ИИ для выделения блюд. Фото появятся в меню только после проверки.' : 'Фото появятся в меню только после проверки модератором.', 'tray-file-hint');
+    const upload = node('button', 'Отправить фото'); upload.type = 'submit'; upload.disabled = true;
+    const uploadStatus = node('p', '', 'tray-upload-status'); uploadStatus.setAttribute('role', 'status');
+    function updatePreview() {
+      revokePreview();
+      preview.hidden = true;
+      preview.removeAttribute('src');
+      const chosen = file.files[0];
+      pickTitle.textContent = chosen ? 'Заменить снимок' : 'Выбрать снимок';
+      hint.textContent = chosen ? chosen.name : 'JPEG или PNG, до 8 МБ';
+      upload.disabled = !chosen;
+      if (chosen) { previewURL = URL.createObjectURL(chosen); preview.src = previewURL; preview.hidden = false; }
+    }
+    preview.addEventListener('error', () => { preview.hidden = true; });
+    file.addEventListener('change', () => { uploadStatus.textContent = ''; updatePreview(); });
+    form.append(context, picker, privacy, upload, uploadStatus); content.append(form);
     form.hidden = !meal.options.length;
     if (form.hidden) content.append(node('p', 'На эту дату нет приёмов пищи для загрузки. Выберите другую дату в меню.', 'note'));
-    const heading = node('h3', 'Мои заявки'); const own = node('div'); const detail = node('div', '', 'tray-detail'); content.append(heading, own);
-    let queue;
-    if (photo_admin) { content.append(node('h3', 'Очередь модерации')); queue = node('div'); content.append(queue); }
+    const detail = node('div', '', 'tray-detail');
     content.append(detail);
     async function list(target, moderation) {
       target.replaceChildren(node('p', 'Загрузка…', 'note'));
@@ -155,25 +179,43 @@
         items.forEach(item => { const row = node('div', '', 'tray-summary'); row.append(button(summaryText(item), () => showDetail(item.id, detail))); if (item.result?.length) row.append(node('p', 'Опубликовано: ' + item.result.join(', '), 'note')); if (item.reason) row.append(node('p', item.reason, 'note')); target.append(row); });
       } catch (e) { message(target, e); }
     }
+    function disclosure(title, moderation) {
+      const panel = node('details', '', 'tray-disclosure');
+      const target = node('div');
+      panel.append(node('summary', title), target);
+      panel.addEventListener('toggle', () => { if (panel.open) list(target, moderation); });
+      content.append(panel);
+      return { panel, target, moderation };
+    }
+    const lists = [disclosure('Мои заявки', false)];
+    if (photo_admin) lists.push(disclosure('Очередь модерации', true));
     form.addEventListener('submit', async event => {
-      event.preventDefault(); if (!file.files.length) return;
-      upload.disabled = true; uploadStatus.textContent = 'Отправка…';
+      event.preventDefault(); if (upload.disabled || !file.files.length) return;
+      const chosen = file.files[0];
+      uploadStatus.classList.remove('tray-error');
+      if (chosen.size > 8 * 1024 * 1024) {
+        uploadStatus.classList.add('tray-error'); uploadStatus.textContent = 'Выберите снимок не больше 8 МБ.'; return;
+      }
+      upload.disabled = file.disabled = meal.disabled = true;
+      uploadStatus.textContent = 'Отправка…';
       try {
-        const item = await (await api('/api/tray?date=' + encodeURIComponent(date) + '&meal=' + encodeURIComponent(meal.value), { method: 'POST', headers: { 'Content-Type': file.files[0].type || 'application/octet-stream' }, body: file.files[0] })).json();
+        const item = await (await api('/api/tray?date=' + encodeURIComponent(date) + '&meal=' + encodeURIComponent(meal.value), { method: 'POST', headers: { 'Content-Type': chosen.type || 'application/octet-stream' }, body: chosen })).json();
         if (!root.open || !form.isConnected) return;
-        file.value = ''; uploadStatus.textContent = 'Фото отправлено.'; list(own, false); if (queue) list(queue, true); showDetail(item.id, detail);
-      } catch (e) { message(uploadStatus, e); } finally { upload.disabled = false; }
+        file.value = ''; updatePreview(); uploadStatus.textContent = 'Фото отправлено на проверку.';
+        for (const { panel, target, moderation } of lists) if (panel.open) list(target, moderation);
+        showDetail(item.id, detail);
+      } catch (e) { uploadStatus.classList.add('tray-error'); message(uploadStatus, e); }
+      finally { file.disabled = meal.disabled = false; upload.disabled = !file.files.length; }
     });
     root.showModal();
     root.scrollTop = 0;
-    list(own, false); if (queue) list(queue, true);
     if (deep) showDetail(deep, detail);
   }
   opener.addEventListener('click', () => openTray());
   document.querySelector('#tray-close').addEventListener('click', () => root.close());
   root.addEventListener('close', () => {
     if (root.open) return;
-    ++detailVersion; revoke(); content.replaceChildren();
+    ++detailVersion; revoke(); revokePreview(); content.replaceChildren();
   });
   let deep = new URLSearchParams(location.search).get('tray') || /^tray_(\d+)$/.exec(app?.initDataUnsafe?.start_param || '')?.[1];
   window.addEventListener('menu:loading', () => { opener.disabled = true; });
