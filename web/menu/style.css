@@ -33,12 +33,18 @@ dialog::backdrop { background: rgb(0 0 0 / 60%); }
 .dialog-image { display: block; width: 100%; max-height: 320px; object-fit: cover; }
 .dialog-close { position: sticky; top: 12px; float: right; margin: 12px 12px -54px 0; z-index: 1; min-width: 42px; min-height: 42px; font-size: 26px; line-height: 1; background: var(--tg-theme-secondary-bg-color, #f3f5f7); color: var(--tg-theme-text-color, #20232a); }
 a { color: var(--tg-theme-link-color, #5188e8); }
+#tray-open { width: 100%; margin-top: 12px; padding: 8px 12px; }
+#tray-open:focus-visible { outline: 3px solid var(--tg-theme-button-color, #5188e8); outline-offset: 2px; }
+#tray-open:disabled { opacity: .55; cursor: default; }
+#tray { overscroll-behavior: contain; }
+.tray-form[hidden] { display: none; }
 .tray-form, .tray-detail, .crop-row { display: grid; gap: 10px; padding: 14px; margin: 12px 0; border-radius: 16px; background: var(--tg-theme-bg-color, #fff); }
 .tray-form label, .crop-row > label { display: block; }
 .tray-form input[type=file], select { max-width: 100%; font: inherit; }
 select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint-color, #77808d); border-radius: 8px; background: var(--tg-theme-bg-color, #fff); color: inherit; }
 .tray-summary { margin: 8px 0; }
 .tray-summary button { text-align: left; padding: 10px; width: 100%; }
+.tray-detail { scroll-margin-top: 56px; }
 .tray-detail:empty { display: none; }
 .tray-detail button, .crop-row button { padding: 10px; }
 .tray-error { color: #c84747; overflow-wrap: anywhere; }
