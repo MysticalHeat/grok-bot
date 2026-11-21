@@ -3,6 +3,7 @@
   const root = document.querySelector('#tray');
   const opener = document.querySelector('#tray-open');
   const content = document.querySelector('#tray-content');
+  const moderation = document.querySelector('#moderation');
   const auth = { 'X-Telegram-Init-Data': app?.initData || '' };
   const labels = { BREAKFAST: 'Завтрак', LUNCH: 'Обед', DINNER: 'Ужин' };
   const statuses = { queued: 'В очереди', review: 'На проверке', closed: 'Завершено' };
@@ -23,7 +24,7 @@
   async function api(path, options = {}) {
     const response = await fetch(path, { ...options, headers: { ...auth, ...options.headers }, cache: 'no-store' });
     if (!response.ok) {
-      const known = { 409: options.body instanceof Blob ? 'Этот файл уже предложен для этого приёма пищи.' : 'Данные изменились. Обновите страницу и попробуйте снова.', 429: 'Превышен лимит загрузок. Попробуйте позже.', 415: 'Поддерживаются только JPEG и PNG.', 413: 'Файл слишком большой.' };
+      const known = { 401: 'Откройте Mini App заново через Telegram-бота.', 403: 'Эта страница доступна только модератору.', 409: options.body instanceof Blob ? 'Этот файл уже предложен для этого приёма пищи.' : 'Данные изменились. Обновите страницу и попробуйте снова.', 429: 'Превышен лимит загрузок. Попробуйте позже.', 415: 'Поддерживаются только JPEG и PNG.', 413: 'Файл слишком большой.' };
       throw new Error(known[response.status] || (await response.text()) || 'Ошибка: ' + response.status);
     }
     return response;
@@ -33,20 +34,21 @@
     return `${dateLabel(item.date)}, ${labels[item.meal] || item.meal} — ${statuses[item.status] || item.status}`;
   }
   async function showDetail(id, target) {
-    if (!root.open || !target.isConnected) return;
+    const visible = () => target.isConnected && (moderation || root.open);
+    if (!visible()) return;
     const version = ++detailVersion;
     revoke(); target.replaceChildren(node('p', 'Загрузка…'));
     try {
       const item = await (await api('/api/tray/' + encodeURIComponent(id))).json();
-      if (!root.open || !target.isConnected || version !== detailVersion) return;
+      if (!visible() || version !== detailVersion) return;
       target.replaceChildren(node('h3', summaryText(item)));
       target.scrollIntoView({ block: 'start' });
       if (item.result?.length) target.append(node('p', 'Опубликовано: ' + item.result.join(', ')));
       else if (item.status === 'closed') target.append(node('p', 'Фото не опубликовано.'));
       if (item.reason) target.append(node('p', item.reason, 'note'));
-      if (!menu.photo_admin || item.status !== 'review') return;
+      if (!moderation || item.status !== 'review') return;
       const frame = await (await api('/api/tray/' + encodeURIComponent(id) + '/frame')).blob();
-      if (!root.open || !target.isConnected || version !== detailVersion) return;
+      if (!visible() || version !== detailVersion) return;
       frameURL = URL.createObjectURL(frame);
       editor(item, target, frameURL);
     } catch (error) { if (version === detailVersion) message(target, error); }
@@ -120,14 +122,16 @@
       submit.disabled = close.disabled = true; error.textContent = '';
       try {
         await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crops: chosen.map(c => { const dish = dishes.find(d => String(d.id) === String(c.dish_id)); return { dish_id: dish.id, x: c.x, y: c.y, w: c.w, h: c.h, replace: c.replace ? dish.photo_id : '' }; }) }) });
-        revoke(); await showDetail(item.id, target);
+        if (target.contains(error)) await showDetail(item.id, target);
+        refreshQueue();
+        if (document.querySelector('#moderation-published').open) refreshPublished();
       } catch (e) { message(error, e); submit.disabled = close.disabled = false; }
     }
     target.append(add, submit, close, error); draw();
   }
-  function openTray(deep) {
+  function openTray() {
     if (!menu?.photos_enabled || opener.disabled || root.open) return;
-    const { date, meals, photo_ai_enabled, photo_admin } = menu;
+    const { date, meals, photo_ai_enabled } = menu;
     ++detailVersion; revoke(); revokePreview(); content.replaceChildren();
     content.append(node('p', 'Один снимок подноса поможет дополнить карточки нескольких блюд.', 'tray-intro'));
     const form = document.createElement('form'); form.className = 'tray-form';
@@ -170,25 +174,17 @@
     if (form.hidden) content.append(node('p', 'На эту дату нет приёмов пищи для загрузки. Выберите другую дату в меню.', 'note'));
     const detail = node('div', '', 'tray-detail');
     content.append(detail);
-    async function list(target, moderation) {
-      target.replaceChildren(node('p', 'Загрузка…', 'note'));
+    const history = node('details', '', 'tray-disclosure');
+    const own = node('div');
+    async function refreshHistory() {
+      own.replaceChildren(node('p', 'Загрузка…', 'note'));
       try {
-        const items = await (await api('/api/tray' + (moderation ? '?moderation=1' : ''))).json();
-        target.replaceChildren();
-        if (!items.length) target.append(node('p', 'Заявок пока нет.', 'note'));
-        items.forEach(item => { const row = node('div', '', 'tray-summary'); row.append(button(summaryText(item), () => showDetail(item.id, detail))); if (item.result?.length) row.append(node('p', 'Опубликовано: ' + item.result.join(', '), 'note')); if (item.reason) row.append(node('p', item.reason, 'note')); target.append(row); });
-      } catch (e) { message(target, e); }
+        renderSubmissions(own, await (await api('/api/tray')).json(), detail);
+      } catch (e) { message(own, e); }
     }
-    function disclosure(title, moderation) {
-      const panel = node('details', '', 'tray-disclosure');
-      const target = node('div');
-      panel.append(node('summary', title), target);
-      panel.addEventListener('toggle', () => { if (panel.open) list(target, moderation); });
-      content.append(panel);
-      return { panel, target, moderation };
-    }
-    const lists = [disclosure('Мои заявки', false)];
-    if (photo_admin) lists.push(disclosure('Очередь модерации', true));
+    history.append(node('summary', 'Мои заявки'), own);
+    history.addEventListener('toggle', () => { if (history.open) refreshHistory(); });
+    content.insertBefore(history, detail);
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (upload.disabled || !file.files.length) return;
       const chosen = file.files[0];
@@ -202,14 +198,89 @@
         const item = await (await api('/api/tray?date=' + encodeURIComponent(date) + '&meal=' + encodeURIComponent(meal.value), { method: 'POST', headers: { 'Content-Type': chosen.type || 'application/octet-stream' }, body: chosen })).json();
         if (!root.open || !form.isConnected) return;
         file.value = ''; updatePreview(); uploadStatus.textContent = 'Фото отправлено на проверку.';
-        for (const { panel, target, moderation } of lists) if (panel.open) list(target, moderation);
+        if (history.open) refreshHistory();
         showDetail(item.id, detail);
       } catch (e) { uploadStatus.classList.add('tray-error'); message(uploadStatus, e); }
       finally { file.disabled = meal.disabled = false; upload.disabled = !file.files.length; }
     });
     root.showModal();
     root.scrollTop = 0;
-    if (deep) showDetail(deep, detail);
+  }
+  function renderSubmissions(target, items, detail) {
+    target.replaceChildren();
+    if (!items.length) target.append(node('p', 'Заявок пока нет.', 'note'));
+    for (const item of items) {
+      const row = node('div', '', 'tray-summary');
+      row.append(button(summaryText(item), () => showDetail(item.id, detail)));
+      if (item.result?.length) row.append(node('p', 'Опубликовано: ' + item.result.join(', '), 'note'));
+      if (item.reason) row.append(node('p', item.reason, 'note'));
+      target.append(row);
+    }
+  }
+  async function refreshQueue() {
+    const status = document.querySelector('#moderation-status');
+    const panel = document.querySelector('#moderation-content');
+    try {
+      const items = await (await api('/api/tray?moderation=1')).json();
+      renderSubmissions(document.querySelector('#moderation-queue'), items, document.querySelector('#moderation-detail'));
+      status.textContent = '';
+      panel.hidden = false;
+      return true;
+    } catch (e) {
+      panel.hidden = true;
+      message(status, e);
+      return false;
+    }
+  }
+  async function refreshPublished() {
+    const target = document.querySelector('#moderation-photos');
+    target.replaceChildren(node('p', 'Загрузка…', 'note'));
+    try {
+      const dishes = await (await api('/api/tray/published')).json();
+      target.replaceChildren();
+      if (!dishes.length) target.append(node('p', 'Опубликованных фото пока нет.', 'note'));
+      for (const dish of dishes) {
+        const row = node('div', '', 'moderation-photo');
+        const img = node('img', '', 'thumb');
+        img.src = '/api/tray-photo/' + encodeURIComponent(dish.photo_id);
+        img.alt = ''; img.loading = 'lazy';
+        const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
+        const remove = button('Снять фото', async () => {
+          if (!confirm('Снять фото блюда «' + dish.name + '»?')) return;
+          remove.disabled = true;
+          try {
+            await api('/api/tray/dish/' + encodeURIComponent(dish.id) + '?photo_id=' + encodeURIComponent(dish.photo_id), { method: 'DELETE' });
+            refreshPublished();
+          } catch (e) { message(error, e); remove.disabled = false; }
+        });
+        remove.setAttribute('aria-label', 'Снять фото блюда «' + dish.name + '»');
+        row.append(img, node('strong', dish.name), remove, error);
+        target.append(row);
+      }
+    } catch (e) { message(target, e); }
+  }
+  const params = new URLSearchParams(location.search);
+  const start = app?.initDataUnsafe?.start_param || '';
+  const trayID = params.get('tray') || /^tray_(\d+)$/.exec(start)?.[1];
+  const deep = /^\d+$/.test(trayID || '') ? trayID : '';
+  if (moderation) {
+    app?.ready();
+    app?.expand();
+    document.querySelector('#moderation-back').href = '/?menu=1' + location.hash;
+    const status = document.querySelector('#moderation-status');
+    if (!app?.initData) { status.textContent = 'Откройте страницу через Telegram-бота.'; return; }
+    const published = document.querySelector('#moderation-published');
+    published.addEventListener('toggle', () => { if (published.open) refreshPublished(); });
+    const refresh = document.querySelector('#moderation-refresh');
+    refresh.addEventListener('click', async () => {
+      refresh.disabled = true;
+      await refreshQueue();
+      refresh.disabled = false;
+    });
+    refreshQueue().then(allowed => {
+      if (allowed && deep) showDetail(deep, document.querySelector('#moderation-detail'));
+    });
+    return;
   }
   opener.addEventListener('click', () => openTray());
   document.querySelector('#tray-close').addEventListener('click', () => root.close());
@@ -217,27 +288,16 @@
     if (root.open) return;
     ++detailVersion; revoke(); revokePreview(); content.replaceChildren();
   });
-  let deep = new URLSearchParams(location.search).get('tray') || /^tray_(\d+)$/.exec(app?.initDataUnsafe?.start_param || '')?.[1];
+  const moderationLink = document.querySelector('#moderation-link');
+  moderationLink.href = '/moderation' + location.hash;
   window.addEventListener('menu:loading', () => { opener.disabled = true; });
   window.addEventListener('menu:loaded', event => {
     menu = event.detail;
     opener.hidden = !menu.photos_enabled;
     opener.disabled = false;
-    if (!opener.hidden && deep && /^\d+$/.test(deep)) {
-      openTray(deep);
-      deep = '';
+    moderationLink.hidden = !menu.photo_admin;
+    if (menu.photo_admin && !params.has('menu') && (deep || start === 'moderation')) {
+      location.replace('/moderation' + (deep ? '?tray=' + encodeURIComponent(deep) : '') + location.hash);
     }
-  });
-  window.addEventListener('menu:dish', event => {
-    const { dish, content: target } = event.detail;
-    if (!menu?.photos_enabled || !menu.photo_admin || dish.image_kind !== 'cafeteria' || !dish.photo_id) return;
-    const error = node('p', '', 'tray-error');
-    const remove = button('Удалить фото столовой', async () => {
-      if (!confirm('Удалить одобренное фото этого блюда?')) return;
-      remove.disabled = true;
-      try { await api('/api/tray/dish/' + encodeURIComponent(dish.id) + '?photo_id=' + encodeURIComponent(dish.photo_id), { method: 'DELETE' }); window.dispatchEvent(new Event('menu:photo-removed')); }
-      catch (e) { message(error, e); remove.disabled = false; }
-    });
-    target.append(remove, error);
   });
 })();

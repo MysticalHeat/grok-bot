@@ -22,6 +22,14 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 	admin := func(r *http.Request) bool {
 		return p.admins[telegramUserID(r.Header.Get("X-Telegram-Init-Data"), token, p.now())]
 	}
+	mux.HandleFunc("GET /api/tray/published", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !admin(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		p.listPublished(w, r)
+	})
 	mux.HandleFunc("GET /api/tray-photo/{photo}", func(w http.ResponseWriter, r *http.Request) {
 		var jpeg []byte
 		err := p.store.db.QueryRowContext(r.Context(), `SELECT jpeg FROM tray_published WHERE photo_id=?`, r.PathValue("photo")).Scan(&jpeg)
@@ -94,6 +102,31 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func (p *trayPhotos) listPublished(w http.ResponseWriter, r *http.Request) {
+	rows, err := p.store.db.QueryContext(r.Context(), `SELECT d.id, COALESCE(NULLIF(c.translated_name,''),d.name), p.photo_id
+		FROM tray_published p JOIN cafeteria_dishes d ON d.id=p.dish_id
+		LEFT JOIN cafeteria_cards c ON c.dish_id=d.id ORDER BY 2,d.id`)
+	if err != nil {
+		trayHTTPError(w, err)
+		return
+	}
+	defer rows.Close()
+	items := []trayDish{}
+	for rows.Next() {
+		var d trayDish
+		if err := rows.Scan(&d.ID, &d.Name, &d.PhotoID); err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		items = append(items, d)
+	}
+	if err := rows.Err(); err != nil {
+		trayHTTPError(w, err)
+		return
+	}
+	trayJSON(w, http.StatusOK, items)
 }
 
 func trayJSON(w http.ResponseWriter, status int, v any) {

@@ -78,6 +78,18 @@ func TestTrayLifecycle(t *testing.T) {
 		t.Fatalf("not reused: %+v", d)
 	}
 	req("GET", d.ImageURL, 0, nil, 200)
+	req("GET", "/moderation", 0, nil, 200) // The shell contains no private data.
+	req("GET", "/api/tray?moderation=1", 0, nil, 401)
+	req("GET", "/api/tray?moderation=1", 321, nil, 403)
+	req("GET", "/api/tray?moderation=1", 123, nil, 200)
+	req("GET", "/api/tray/published", 0, nil, 403)
+	req("GET", "/api/tray/published", 321, nil, 403)
+	w := req("GET", "/api/tray/published", 123, nil, 200)
+	var published []trayDish
+	if err := json.Unmarshal(w.Body.Bytes(), &published); err != nil || len(published) != 2 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("published moderator listing: %+v %v", published, err)
+	}
+	req("DELETE", "/api/tray/dish/1?photo_id="+d.PhotoID, 321, nil, 403)
 	// Same JPEG/PNG bytes with a trailing byte are different source files.
 	for i := byte(1); i <= 3; i++ {
 		want := http.StatusCreated

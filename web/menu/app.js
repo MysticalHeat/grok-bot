@@ -85,7 +85,6 @@
     (dish.sources || []).forEach((source, i) => addLink(content, 'Источник описания ' + (i + 1), source));
     if (!dish.short_description && !dish.description && !dish.ingredients?.length && !imageURL && !dish.sources?.length) content.append(element('p', 'Подробности пока не подготовлены.', 'note'));
     dialogContent.append(content);
-    window.dispatchEvent(new CustomEvent('menu:dish', { detail: { dish, content } }));
     dialog.showModal();
   }
   document.querySelector('#dish-close').addEventListener('click', () => dialog.close());
@@ -142,6 +141,5 @@
   document.querySelector('#previous').addEventListener('click', () => move(-1));
   document.querySelector('#next').addEventListener('click', () => move(1));
   document.querySelector('#today').addEventListener('click', () => load(''));
-  window.addEventListener('menu:photo-removed', () => { dialog.close(); load(date); });
   load();
 })();

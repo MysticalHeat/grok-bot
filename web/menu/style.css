@@ -99,6 +99,15 @@ select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint
 .tray-form button[type=submit]:disabled { background: var(--tray-panel); color: var(--tray-muted); cursor: default; }
 .tray-disclosure { border-top: 1px solid var(--tray-edge); }
 .tray-disclosure summary { min-height: 44px; padding: 11px 4px; cursor: pointer; font-weight: 650; }
+.moderation-link:not([hidden]) { display: inline-flex; align-items: center; min-height: 44px; }
+#moderation-back { display: inline-flex; align-items: center; min-height: 44px; }
+.moderation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.moderation-toolbar h2 { margin: 0; }
+.moderation-toolbar button, .moderation-photo button { padding: 8px 12px; }
+.moderation-photo { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 0; }
+.moderation-photo strong { flex: 1 1 90px; overflow-wrap: anywhere; }
+.moderation-photo .tray-error { flex-basis: 100%; margin: 0; }
+#moderation-status:empty { display: none; }
 @media (prefers-color-scheme: dark) {
   #tray {
     --tray-panel: var(--tg-theme-secondary-bg-color, #263c49);

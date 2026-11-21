@@ -135,6 +135,11 @@ func newMenuHandler(store *SQLiteStore, token string, photoOptions ...*trayPhoto
 	}
 	if photos != nil {
 		photos.register(mux, token)
+		mux.HandleFunc("GET /moderation", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			http.ServeFileFS(w, r, assets, "moderation.html")
+		})
 	}
 	mux.HandleFunc("/api/menu", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
