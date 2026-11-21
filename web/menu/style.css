@@ -33,5 +33,23 @@ dialog::backdrop { background: rgb(0 0 0 / 60%); }
 .dialog-image { display: block; width: 100%; max-height: 320px; object-fit: cover; }
 .dialog-close { position: sticky; top: 12px; float: right; margin: 12px 12px -54px 0; z-index: 1; min-width: 42px; min-height: 42px; font-size: 26px; line-height: 1; background: var(--tg-theme-secondary-bg-color, #f3f5f7); color: var(--tg-theme-text-color, #20232a); }
 a { color: var(--tg-theme-link-color, #5188e8); }
+.tray-form, .tray-detail, .crop-row { display: grid; gap: 10px; padding: 14px; margin: 12px 0; border-radius: 16px; background: var(--tg-theme-bg-color, #fff); }
+.tray-form label, .crop-row > label { display: block; }
+.tray-form input[type=file], select { max-width: 100%; font: inherit; }
+select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint-color, #77808d); border-radius: 8px; background: var(--tg-theme-bg-color, #fff); color: inherit; }
+.tray-summary { margin: 8px 0; }
+.tray-summary button { text-align: left; padding: 10px; width: 100%; }
+.tray-detail:empty { display: none; }
+.tray-detail button, .crop-row button { padding: 10px; }
+.tray-error { color: #c84747; overflow-wrap: anywhere; }
+.tray-error:empty { display: none; }
+.crop-stage { position: relative; width: 100%; touch-action: none; user-select: none; }
+.crop-stage img { display: block; width: 100%; height: auto; }
+.crop-boxes { position: absolute; inset: 0; pointer-events: none; }
+.crop-box { position: absolute; border: 2px solid #ffca28; color: #111; background: rgb(255 202 40 / 20%); font-weight: bold; }
+.crop-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.crop-fields label { font-size: 12px; }
+.crop-fields input { display: block; width: 100%; min-width: 0; }
 @media (prefers-color-scheme: dark) { :root { background: var(--tg-theme-secondary-bg-color, #17212b); color: var(--tg-theme-text-color, #fff); } .date-nav, .dish-card, dialog { background: var(--tg-theme-bg-color, #242f3d); } .dialog-close { background: var(--tg-theme-secondary-bg-color, #17212b); color: var(--tg-theme-text-color, #fff); } }
+@media (prefers-color-scheme: dark) { .tray-form, .tray-detail, .crop-row, select, input[type=number] { background: var(--tg-theme-bg-color, #242f3d); } }
 @media (prefers-reduced-motion: reduce) { .date-arrow { transition: none; } }

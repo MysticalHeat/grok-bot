@@ -17,7 +17,11 @@ import (
 )
 
 func signedInitData(token string, stamp time.Time) string {
-	v := url.Values{"auth_date": {fmt.Sprint(stamp.Unix())}, "user": {`{"id":123,"first_name":"Test"}`}, "query_id": {"query"}}
+	return signedInitDataForUser(token, stamp, 123)
+}
+
+func signedInitDataForUser(token string, stamp time.Time, id int64) string {
+	v := url.Values{"auth_date": {fmt.Sprint(stamp.Unix())}, "user": {fmt.Sprintf(`{"id":%d,"first_name":"Test"}`, id)}, "query_id": {"query"}}
 	keys := make([]string, 0, len(v))
 	for k := range v {
 		keys = append(keys, k)
