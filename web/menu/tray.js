@@ -58,15 +58,23 @@
     const crops = (item.suggestions || []).map(s => ({ ...s, selected: !!s.selected, replace: false }));
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
-    const img = node('img'); img.src = url; img.alt = 'Фото подноса для разметки'; img.draggable = false;
-    const boxes = node('div', '', 'crop-boxes'); stage.append(img, boxes);
+    const img = node('img'); img.alt = 'Фото подноса для разметки'; img.draggable = false;
+    const boxes = node('div', '', 'crop-boxes'); boxes.setAttribute('aria-hidden', 'true');
+    const draft = node('div', '', 'crop-box crop-draft'); draft.hidden = true; draft.setAttribute('aria-hidden', 'true');
+    stage.append(img, boxes, draft);
     const list = node('div', '', 'crop-list');
-    target.append(node('p', 'Выделите область пальцем на фото или добавьте её вручную. Координаты можно изменить ниже.'), stage, list);
+    const hint = node('p', 'Проведите по фото, чтобы прокрутить страницу.', 'crop-hint');
+    hint.setAttribute('role', 'status');
+    const tools = node('div', '', 'crop-tools');
+    target.append(tools, hint, stage, list);
+    function placeBox(box, { x, y, w, h }) {
+      Object.assign(box.style, { left: `${x / 10}%`, top: `${y / 10}%`, width: `${w / 10}%`, height: `${h / 10}%` });
+    }
     function draw() {
       boxes.replaceChildren(); list.replaceChildren();
       crops.forEach((crop, i) => {
         const box = node('div', String(i + 1), 'crop-box');
-        box.style.cssText = `left:${crop.x / 10}%;top:${crop.y / 10}%;width:${crop.w / 10}%;height:${crop.h / 10}%`;
+        placeBox(box, crop);
         boxes.append(box);
         const row = node('div', '', 'crop-row');
         const selectLabel = node('label', ' Использовать область ' + (i + 1));
@@ -82,7 +90,7 @@
         [['x', 'Слева'], ['y', 'Сверху'], ['w', 'Ширина'], ['h', 'Высота']].forEach(([key, label]) => {
           const wrap = node('label', label); const input = document.createElement('input');
           input.type = 'number'; input.min = key === 'w' || key === 'h' ? '1' : '0'; input.max = '1000'; input.step = '1'; input.value = crop[key];
-          input.addEventListener('input', () => { crop[key] = Number(input.value); box.style.cssText = `left:${crop.x / 10}%;top:${crop.y / 10}%;width:${crop.w / 10}%;height:${crop.h / 10}%`; });
+          input.addEventListener('input', () => { crop[key] = Number(input.value); placeBox(box, crop); });
           wrap.append(input); fields.append(wrap);
         });
         row.append(fields);
@@ -96,16 +104,80 @@
         row.append(button('Удалить область', () => { crops.splice(i, 1); draw(); })); list.append(row);
       });
     }
-    let start;
-    const point = event => { const r = stage.getBoundingClientRect(); return { x: Math.max(0, Math.min(1000, Math.round((event.clientX - r.left) / r.width * 1000))), y: Math.max(0, Math.min(1000, Math.round((event.clientY - r.top) / r.height * 1000))) }; };
-    stage.addEventListener('pointerdown', event => { start = point(event); stage.setPointerCapture(event.pointerId); });
-    stage.addEventListener('pointercancel', () => { start = null; });
-    stage.addEventListener('pointerup', event => {
-      if (!start) return; const end = point(event);
-      const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y), w = Math.abs(start.x - end.x), h = Math.abs(start.y - end.y); start = null;
-      if (w && h) { crops.push({ x, y, w, h, dish_id: '', selected: true, replace: false }); draw(); }
+    let drawing = false;
+    let gesture;
+    const add = button('Выделить на фото', () => setDrawing(!drawing));
+    add.disabled = true;
+    add.setAttribute('aria-pressed', 'false');
+    img.addEventListener('load', () => {
+      stage.style.setProperty('--crop-aspect', img.naturalWidth / img.naturalHeight);
+      add.disabled = false;
     });
-    const add = button('Добавить область вручную', () => { crops.push({ x: 100, y: 100, w: 400, h: 400, dish_id: '', selected: true, replace: false }); draw(); });
+    img.addEventListener('error', () => { hint.textContent = 'Не удалось открыть фото. Попробуйте открыть заявку заново.'; });
+    img.src = url;
+
+    function clearGesture() {
+      const id = gesture?.id;
+      gesture = undefined;
+      draft.hidden = true;
+      if (id !== undefined && stage.hasPointerCapture(id)) stage.releasePointerCapture(id);
+    }
+    function setDrawing(active) {
+      clearGesture();
+      drawing = active;
+      stage.classList.toggle('is-drawing', active);
+      add.textContent = active ? 'Отменить выделение' : 'Выделить на фото';
+      add.setAttribute('aria-pressed', String(active));
+      hint.textContent = active
+        ? 'Проведите по диагонали от одного угла области к другому.'
+        : 'Проведите по фото, чтобы прокрутить страницу.';
+    }
+    function point(event, bounds) {
+      const unit = (offset, size) => Math.max(0, Math.min(1000, Math.round(offset / size * 1000)));
+      return { x: unit(event.clientX - bounds.left, bounds.width), y: unit(event.clientY - bounds.top, bounds.height) };
+    }
+    function dragArea(event) {
+      const { bounds, start } = gesture;
+      const end = point(event, bounds);
+      const w = Math.abs(start.x - end.x);
+      const h = Math.abs(start.y - end.y);
+      // Ignore taps, jitter and almost horizontal/vertical swipes.
+      const minPixels = 12;
+      if (w * bounds.width / 1000 < minPixels || h * bounds.height / 1000 < minPixels) return null;
+      return { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), w, h };
+    }
+    stage.addEventListener('pointerdown', event => {
+      if (!drawing || gesture || !event.isPrimary || event.button !== 0) return;
+      const bounds = stage.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      gesture = { id: event.pointerId, bounds, start: point(event, bounds) };
+      stage.setPointerCapture(event.pointerId);
+    });
+    stage.addEventListener('pointermove', event => {
+      if (gesture?.id !== event.pointerId) return;
+      const area = dragArea(event);
+      draft.hidden = !area;
+      if (area) placeBox(draft, area);
+    });
+    stage.addEventListener('pointerup', event => {
+      if (gesture?.id !== event.pointerId) return;
+      const area = dragArea(event);
+      clearGesture();
+      if (!area) return;
+      setDrawing(false);
+      crops.push({ ...area, dish_id: '', selected: true, replace: false });
+      draw();
+    });
+    for (const eventName of ['pointercancel', 'lostpointercapture']) {
+      stage.addEventListener(eventName, event => { if (gesture?.id === event.pointerId) setDrawing(false); });
+    }
+    const manual = button('Ввести координаты', () => {
+      setDrawing(false);
+      crops.push({ x: 100, y: 100, w: 400, h: 400, dish_id: '', selected: true, replace: false });
+      draw();
+      list.lastElementChild?.querySelector('select')?.focus();
+    });
+    tools.append(add, manual);
     const submit = button('Опубликовать выбранные области', () => decide(false));
     const close = button('Закрыть без публикации', () => decide(true));
     async function decide(empty) {
@@ -127,7 +199,9 @@
         if (document.querySelector('#moderation-published').open) refreshPublished();
       } catch (e) { message(error, e); submit.disabled = close.disabled = false; }
     }
-    target.append(add, submit, close, error); draw();
+    const actions = node('div', '', 'crop-actions');
+    actions.append(submit, close);
+    target.append(actions, error); draw();
   }
   function openTray() {
     if (!menu?.photos_enabled || opener.disabled || root.open) return;
