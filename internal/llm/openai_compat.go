@@ -14,9 +14,10 @@ import (
 )
 
 type openAICompatClient struct {
-	httpClient *http.Client
-	baseURL    string
-	bearer     string
+	httpClient        *http.Client
+	baseURL           string
+	bearer            string
+	requireOpenAIBYOK bool
 }
 
 const OpenRouterBaseURL = "https://openrouter.ai/api/v1"
@@ -28,9 +29,10 @@ func newOpenAICompatClient(cfg Config) (Client, error) {
 	}
 
 	return &openAICompatClient{
-		httpClient: &http.Client{},
-		baseURL:    OpenRouterBaseURL,
-		bearer:     bearer,
+		httpClient:        &http.Client{},
+		baseURL:           OpenRouterBaseURL,
+		bearer:            bearer,
+		requireOpenAIBYOK: cfg.RequireOpenAIBYOK,
 	}, nil
 }
 
@@ -38,6 +40,13 @@ func (c *openAICompatClient) Generate(ctx context.Context, req Request) (Respons
 	payload, err := toOpenAIChatRequest(req)
 	if err != nil {
 		return Response{}, err
+	}
+	if c.requireOpenAIBYOK {
+		payload.Provider = &openAIProviderRouting{
+			Only:              []string{"openai"},
+			AllowFallbacks:    false,
+			RequireParameters: true,
+		}
 	}
 
 	body, err := json.Marshal(payload)
@@ -71,6 +80,9 @@ func (c *openAICompatClient) Generate(ctx context.Context, req Request) (Respons
 	if err := json.Unmarshal(respBody, &decoded); err != nil {
 		return Response{}, err
 	}
+	if c.requireOpenAIBYOK && (decoded.Usage == nil || !decoded.Usage.IsBYOK) {
+		return Response{}, fmt.Errorf("OpenRouter response did not confirm BYOK usage")
+	}
 	return decoded.toResponse(), nil
 }
 
@@ -85,13 +97,20 @@ func (e *APIError) Error() string {
 }
 
 type openAIChatRequest struct {
-	Model          string          `json:"model"`
-	MaxTokens      int             `json:"max_tokens,omitempty"`
-	Messages       []openAIMessage `json:"messages"`
-	Tools          []openAITool    `json:"tools,omitempty"`
-	ToolChoice     string          `json:"tool_choice,omitempty"`
-	Temperature    *float64        `json:"temperature,omitempty"`
-	ResponseFormat any             `json:"response_format,omitempty"`
+	Model          string                 `json:"model"`
+	MaxTokens      int                    `json:"max_tokens,omitempty"`
+	Messages       []openAIMessage        `json:"messages"`
+	Tools          []openAITool           `json:"tools,omitempty"`
+	ToolChoice     string                 `json:"tool_choice,omitempty"`
+	Temperature    *float64               `json:"temperature,omitempty"`
+	ResponseFormat any                    `json:"response_format,omitempty"`
+	Provider       *openAIProviderRouting `json:"provider,omitempty"`
+}
+
+type openAIProviderRouting struct {
+	Only              []string `json:"only"`
+	AllowFallbacks    bool     `json:"allow_fallbacks"`
+	RequireParameters bool     `json:"require_parameters"`
 }
 
 type openAIMessage struct {
@@ -124,6 +143,10 @@ type openAIChatResponse struct {
 		PromptTokens     int      `json:"prompt_tokens"`
 		CompletionTokens int      `json:"completion_tokens"`
 		Cost             *float64 `json:"cost"`
+		IsBYOK           bool     `json:"is_byok"`
+		CostDetails      struct {
+			UpstreamInferenceCost *float64 `json:"upstream_inference_cost"`
+		} `json:"cost_details"`
 	} `json:"usage"`
 	Choices []struct {
 		Message openAIResponseMessage `json:"message"`
@@ -224,7 +247,16 @@ func (r openAIChatResponse) toResponse() Response {
 	text := extractOpenAIText(m.Content)
 	resp := Response{Text: text}
 	if r.Usage != nil {
-		resp.Usage = &Usage{PromptTokens: r.Usage.PromptTokens, CompletionTokens: r.Usage.CompletionTokens, Cost: r.Usage.Cost}
+		cost := r.Usage.Cost
+		if r.Usage.IsBYOK {
+			fee, upstream := cost, r.Usage.CostDetails.UpstreamInferenceCost
+			cost = nil
+			if fee != nil && upstream != nil && *fee >= 0 && *upstream >= 0 {
+				total := *fee + *upstream
+				cost = &total
+			}
+		}
+		resp.Usage = &Usage{PromptTokens: r.Usage.PromptTokens, CompletionTokens: r.Usage.CompletionTokens, Cost: cost}
 	}
 	delta := Content{Role: strings.TrimSpace(firstNonEmptyCompat(m.Role, "assistant"))}
 	if text != "" {

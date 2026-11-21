@@ -15,7 +15,9 @@ import (
 	"telegram-gemini-bot/internal/llm"
 )
 
-const imageCheckVersion = "vision-v1"
+const imageCheckVersion = "vision-v2"
+
+const imageMainSubjectRule = "Approve only when the requested dish is the clear main subject of the image. If the dish appears only as one item among many on a shared table, do not approve. "
 
 var errImageBudgetBlocked = errors.New("image budget exhausted or request cost unknown")
 
@@ -223,7 +225,7 @@ func (p *cafeteriaPreparer) prepareVerifiedImage(ctx context.Context, job *cafet
 		}
 		payload, _ := json.Marshal(map[string]string{"original_name": job.Name, "canonical_name": profile.Canonical, "known_features": profile.Features, "file_title": c.Caption})
 		schema := &llm.Schema{Type: "object", Required: []string{"decision", "reason"}, Properties: map[string]*llm.Schema{"decision": {Type: "string"}, "reason": {Type: "string"}}}
-		prompt := `Assess whether this photo is a suitable example of the specific cafeteria dish. Compare visible food and title with the known dish features. Reject clear contradictions such as beans in plain rice or a dry dish for broth. Do not invent unseen ingredients. If ambiguous, choose review. Return JSON: decision is approve, reject, or review; reason is brief Russian text. Data: `
+		prompt := `Assess whether this photo is a suitable example of the specific cafeteria dish. ` + imageMainSubjectRule + `Compare visible food and title with the known dish features. Reject clear contradictions such as beans in plain rice or a dry dish for broth. Do not invent unseen ingredients. If ambiguous, choose review. Return JSON: decision is approve, reject, or review; reason is brief Russian text. Data: `
 		resp, err := p.paidImageGenerate(ctx, job.DishID, "vision", llm.Request{Model: p.config.CafeteriaModel, MaxTokens: 1536, ResponseSchema: schema, Contents: []llm.Content{{Role: "user", Parts: []llm.Part{{Text: prompt + string(payload)}, {Data: image, MimeType: mime}}}}})
 		if err != nil {
 			return cafeteriaImage{}, err
