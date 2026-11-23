@@ -144,6 +144,169 @@
       editor(item, target, frameURL);
     }
   }
+  function placeBox(box, { x, y, w, h }) {
+    Object.assign(box.style, { left: `${x / 10}%`, top: `${y / 10}%`, width: `${w / 10}%`, height: `${h / 10}%` });
+  }
+  function orientPhoto(stage, img, rotation) {
+    const aspect = img.naturalWidth / img.naturalHeight;
+    const sideways = rotation % 2 === 1;
+    stage.style.setProperty('--crop-aspect', sideways ? 1 / aspect : aspect);
+    // The image keeps its original aspect; the stage fits its rotated bounds.
+    stage.style.setProperty('--photo-width', `${sideways ? 100 * aspect : 100}%`);
+    stage.style.setProperty('--photo-angle', `${rotation * 90}deg`);
+  }
+  function validCrop(c) {
+    return ['x', 'y', 'w', 'h'].every(k => Number.isInteger(c[k])) &&
+      c.x >= 0 && c.y >= 0 && c.w > 0 && c.h > 0 && c.x + c.w <= 1000 && c.y + c.h <= 1000;
+  }
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  function adjustCrop({ x, y, w, h }, grip, dx, dy) {
+    if (grip === 'move') return { x: clamp(x + dx, 0, 1000 - w), y: clamp(y + dy, 0, 1000 - h), w, h };
+    const right = x + w, bottom = y + h;
+    const left = grip.includes('w') ? clamp(x + dx, 0, right - 1) : x;
+    const top = grip.includes('n') ? clamp(y + dy, 0, bottom - 1) : y;
+    return {
+      x: left, y: top,
+      w: (grip.includes('e') ? clamp(right + dx, x + 1, 1000) : right) - left,
+      h: (grip.includes('s') ? clamp(bottom + dy, y + 1, 1000) : bottom) - top,
+    };
+  }
+  function photoEditor(target, source, crops, rotation, active, dishName, apply) {
+    const draft = crops.map(c => ({ ...c }));
+    const dialog = node('dialog', '', 'photo-editor');
+    dialog.setAttribute('aria-labelledby', 'photo-editor-title');
+    const title = node('h2', 'Редактор фото подноса');
+    title.id = 'photo-editor-title';
+    const controls = node('div', '', 'photo-editor-controls');
+    const left = button('↶ Влево на 90°', () => turn(-1));
+    const right = button('↷ Вправо на 90°', () => turn(1));
+    const angles = node('div', '', 'photo-editor-angles');
+    angles.append(left, right);
+    const picker = node('label', 'Область');
+    const select = node('select');
+    picker.append(select);
+    picker.hidden = !draft.length;
+    controls.append(angles, picker);
+    const help = node('p', draft.length
+      ? 'Выберите рамку. Перетащите её целиком или потяните за угол.'
+      : 'Здесь можно повернуть снимок. Добавить области можно в карточке заявки.', 'photo-editor-help');
+    const well = node('div', '', 'photo-editor-well');
+    const stage = node('div', '', 'crop-stage photo-editor-stage');
+    const img = node('img');
+    img.alt = source.alt;
+    img.draggable = false;
+    img.src = source.src;
+    const boxes = node('div', '', 'crop-boxes');
+    const handles = node('div', '', 'photo-editor-handles');
+    handles.hidden = !draft.length;
+    stage.append(img, boxes, handles);
+    well.append(stage);
+
+    const targets = draft.map((c, i) => {
+      const name = `${i + 1}. ${dishName(c)}`;
+      const option = node('option', name);
+      option.value = String(i);
+      select.append(option);
+      const box = button(String(i + 1), () => choose(i));
+      box.className = 'crop-box crop-target';
+      box.setAttribute('aria-label', name);
+      boxes.append(box);
+      return box;
+    });
+    for (const [grip, label] of [['nw', 'Верхний левый угол'], ['ne', 'Верхний правый угол'], ['sw', 'Нижний левый угол'], ['se', 'Нижний правый угол']]) {
+      const handle = node('button');
+      handle.type = 'button';
+      handle.dataset.grip = grip;
+      handle.setAttribute('aria-label', label);
+      handles.append(handle);
+    }
+    let gesture;
+    function draw() {
+      orientPhoto(stage, source, rotation);
+      targets.forEach((box, i) => {
+        placeBox(box, draft[i]);
+        box.setAttribute('aria-pressed', String(i === active));
+        if (i === active) box.dataset.grip = 'move';
+        else delete box.dataset.grip;
+      });
+      if (targets[active]) placeBox(handles, draft[active]);
+      select.value = String(active);
+    }
+    function choose(i) {
+      finishGesture(true);
+      active = i;
+      draw();
+    }
+    select.addEventListener('change', () => choose(Number(select.value)));
+    function turn(direction) {
+      finishGesture(true);
+      rotation = (rotation + direction + 4) % 4;
+      for (const c of draft) {
+        const { x, y, w, h } = c;
+        Object.assign(c, direction === 1
+          ? { x: 1000 - y - h, y: x, w: h, h: w }
+          : { x: y, y: 1000 - x - w, w: h, h: w });
+      }
+      draw();
+    }
+    function finishGesture(cancel) {
+      if (!gesture) return;
+      const { id, start } = gesture;
+      gesture = undefined;
+      if (stage.hasPointerCapture(id)) stage.releasePointerCapture(id);
+      if (cancel) {
+        Object.assign(draft[active], start);
+        draw();
+      }
+    }
+    stage.addEventListener('pointerdown', event => {
+      const grip = event.target.closest('[data-grip]')?.dataset.grip;
+      if (!grip || gesture || !event.isPrimary || event.button !== 0) return;
+      const { width, height } = stage.getBoundingClientRect();
+      if (!width || !height) return;
+      gesture = { grip, id: event.pointerId, start: { ...draft[active] }, width, height, x: event.clientX, y: event.clientY };
+      stage.setPointerCapture(event.pointerId);
+    });
+    function move(event) {
+      const { grip, start, width, height, x, y } = gesture;
+      const dx = Math.round((event.clientX - x) * 1000 / width);
+      const dy = Math.round((event.clientY - y) * 1000 / height);
+      Object.assign(draft[active], adjustCrop(start, grip, dx, dy));
+      placeBox(targets[active], draft[active]);
+      placeBox(handles, draft[active]);
+    }
+    stage.addEventListener('pointermove', event => { if (gesture?.id === event.pointerId) move(event); });
+    stage.addEventListener('pointerup', event => {
+      if (gesture?.id !== event.pointerId) return;
+      move(event);
+      finishGesture(false);
+    });
+    for (const eventName of ['pointercancel', 'lostpointercapture']) {
+      stage.addEventListener(eventName, event => { if (gesture?.id === event.pointerId) finishGesture(true); });
+    }
+    stage.addEventListener('keydown', event => {
+      const grip = event.target.dataset.grip;
+      const delta = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+      if (!grip || !delta || gesture) return;
+      event.preventDefault();
+      const step = event.shiftKey ? 1 : 10;
+      Object.assign(draft[active], adjustCrop(draft[active], grip, delta[0] * step, delta[1] * step));
+      draw();
+    });
+    const actions = node('div', '', 'photo-editor-actions');
+    const cancel = button('Отмена', () => dialog.close());
+    const done = button('Готово', () => {
+      finishGesture(true);
+      dialog.close();
+      apply(draft, rotation);
+    });
+    actions.append(cancel, done);
+    dialog.append(title, controls, help, well, actions);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    target.append(dialog);
+    draw();
+    dialog.showModal();
+  }
   function editor(item, target, url) {
     const dishes = item.dishes || [];
     const findDish = id => dishes.find(d => String(d.id) === String(id));
@@ -151,6 +314,7 @@
       ...s, selected: !!s.selected && !findDish(s.dish_id)?.photo_id, replace: false,
     }));
     const original = JSON.stringify(crops);
+    let rotation = 0;
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
     const img = node('img'); img.alt = 'Фото подноса для разметки'; img.draggable = false;
@@ -163,9 +327,28 @@
     const hint = node('p', inspectHint, 'crop-hint');
     hint.setAttribute('role', 'status');
     const tools = node('div', '', 'crop-tools');
-    if (url) target.append(tools, hint, stage, list);
-    function placeBox(box, { x, y, w, h }) {
-      Object.assign(box.style, { left: `${x / 10}%`, top: `${y / 10}%`, width: `${w / 10}%`, height: `${h / 10}%` });
+    const editorError = node('p', '', 'tray-error'); editorError.setAttribute('role', 'status');
+    if (url) target.append(tools, editorError, hint, stage, list);
+    const openEditor = button('Открыть редактор', () => openPhotoEditor());
+    openEditor.className = 'crop-open-editor';
+    openEditor.disabled = true;
+    function openPhotoEditor(i = -1) {
+      if (openEditor.disabled) return;
+      if (crops.some(c => !validCrop(c))) {
+        editorError.textContent = 'Проверьте числовые координаты: все рамки должны быть внутри фото.';
+        editorError.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      editorError.textContent = '';
+      setDrawing(false);
+      const initial = i >= 0 ? i : Math.max(0, crops.findIndex(c => c.selected));
+      photoEditor(target, img, crops, rotation, initial, c => findDish(c.dish_id)?.name || 'Блюдо не выбрано', (draft, turns) => {
+        crops.splice(0, crops.length, ...draft);
+        rotation = turns;
+        orientPhoto(stage, img, rotation);
+        draw();
+        (list.children[i]?.querySelector('.crop-edit') || openEditor).focus({ preventScroll: true });
+      });
     }
     let drawing = false;
     let activeBox;
@@ -222,7 +405,11 @@
         [['x', 'Слева'], ['y', 'Сверху'], ['w', 'Ширина'], ['h', 'Высота']].forEach(([key, label]) => {
           const wrap = node('label', label); const input = document.createElement('input');
           input.type = 'number'; input.min = key === 'w' || key === 'h' ? '1' : '0'; input.max = '1000'; input.step = '1'; input.value = crop[key];
-          input.addEventListener('input', () => { crop[key] = Number(input.value); placeBox(box, crop); });
+          input.addEventListener('input', () => {
+            crop[key] = input.valueAsNumber;
+            placeBox(box, crop);
+            editorError.textContent = '';
+          });
           wrap.append(input); fields.append(wrap);
         });
         row.append(fields);
@@ -243,7 +430,11 @@
         });
         updateDish(findDish(crop.dish_id));
         if (crop.reason) row.append(node('p', crop.reason, 'note'));
-        row.append(button('Удалить область', () => { crops.splice(i, 1); draw(); })); list.append(row);
+        const edit = button('Изменить рамку', () => openPhotoEditor(i));
+        edit.className = 'crop-edit';
+        const rowActions = node('div', '', 'crop-tools');
+        rowActions.append(edit, button('Удалить область', () => { crops.splice(i, 1); draw(); }));
+        row.append(rowActions); list.append(row);
       });
     }
     let gesture;
@@ -251,8 +442,8 @@
     add.disabled = true;
     add.setAttribute('aria-pressed', 'false');
     img.addEventListener('load', () => {
-      stage.style.setProperty('--crop-aspect', img.naturalWidth / img.naturalHeight);
-      add.disabled = false;
+      orientPhoto(stage, img, rotation);
+      openEditor.disabled = add.disabled = false;
     });
     img.addEventListener('error', () => { hint.textContent = 'Не удалось открыть фото. Попробуйте открыть заявку заново.'; });
     if (url) img.src = url;
@@ -320,11 +511,11 @@
       draw();
       list.lastElementChild?.querySelector('select')?.focus();
     });
-    tools.append(add, manual);
+    tools.append(openEditor, add, manual);
     const submit = button('Опубликовать выбранные области', () => decide(false));
     const close = button('Закрыть без публикации', () => decide(true));
     const rescan = button('Повторить ИИ-скан', async () => {
-      if (JSON.stringify(crops) !== original && !confirm('Повторный ИИ-скан заменит разметку. Несохранённые правки будут потеряны. Продолжить?')) return;
+      if ((rotation || JSON.stringify(crops) !== original) && !confirm('Повторный ИИ-скан заменит разметку. Несохранённые правки будут потеряны. Продолжить?')) return;
       setBusy(true);
       try {
         await api('/api/tray/' + encodeURIComponent(item.id) + '/rescan', { method: 'POST' });
@@ -344,14 +535,21 @@
       const ids = new Set();
       for (const c of chosen) {
         const dish = findDish(c.dish_id);
-        if (!dish || ids.has(String(dish.id)) || !['x', 'y', 'w', 'h'].every(k => Number.isInteger(c[k])) || c.x < 0 || c.y < 0 || c.w <= 0 || c.h <= 0 || c.x + c.w > 1000 || c.y + c.h > 1000) { error.textContent = 'Проверьте блюдо и координаты областей: размеры должны быть положительными, области — внутри фото, блюда не должны повторяться.'; return; }
+        if (!dish || ids.has(String(dish.id)) || !validCrop(c)) { error.textContent = 'Проверьте блюдо и координаты областей: размеры должны быть положительными, области — внутри фото, блюда не должны повторяться.'; return; }
         if (dish.photo_id && !c.replace) { error.textContent = 'Для замены существующего фото отметьте явное согласие на замену.'; return; }
         ids.add(String(dish.id));
       }
       if (empty && !confirm('Закрыть заявку без публикации?')) return;
       setBusy(true);
       try {
-        await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crops: chosen.map(c => { const dish = findDish(c.dish_id); return { dish_id: dish.id, x: c.x, y: c.y, w: c.w, h: c.h, replace: c.replace ? dish.photo_id : '' }; }) }) });
+        const publish = chosen.map(({ dish_id, x, y, w, h, replace }) => {
+          const dish = findDish(dish_id);
+          return { dish_id: dish.id, x, y, w, h, replace: replace ? dish.photo_id : '' };
+        });
+        await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rotation, crops: publish }),
+        });
         if (target.contains(error)) await showDetail(item.id, target);
         refreshQueue();
         if (document.querySelector('#moderation-published').open) refreshPublished();
