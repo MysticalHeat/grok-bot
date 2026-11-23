@@ -34,11 +34,13 @@ type menuDish struct {
 	Sources          []string `json:"sources"`
 	NeedsReview      bool     `json:"needs_review"`
 	ImageURL         string   `json:"image_url"`
+	ImageRotation    int      `json:"image_rotation,omitempty"`
 	ImageSource      string   `json:"image_source"`
 	ImageAuthor      string   `json:"image_author"`
 	ImageLicense     string   `json:"image_license"`
 	ImageLicenseURL  string   `json:"image_license_url"`
 	ImageStatus      string   `json:"image_status"`
+	trayRotation     int
 }
 
 func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string][]menuDish, error) {
@@ -46,7 +48,8 @@ func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string]
 		COALESCE(c.translated_name,''), COALESCE(c.short_description,''), COALESCE(c.description,''),
 		COALESCE(c.typical_ingredients,'[]'), COALESCE(c.sources,'[]'), COALESCE(c.needs_review,1),
 		COALESCE(i.image_url,''), COALESCE(i.source_url,''), COALESCE(i.author,''),
-		COALESCE(i.license,''), COALESCE(i.license_url,''), COALESCE(i.status,'')
+		COALESCE(i.license,''), COALESCE(i.license_url,''), COALESCE(i.status,''),
+		COALESCE(i.rotation,0), COALESCE(p.rotation,0)
 		FROM cafeteria_schedule s JOIN cafeteria_dishes d ON d.id=s.dish_id
 		LEFT JOIN cafeteria_cards c ON c.dish_id=d.id LEFT JOIN cafeteria_images i ON i.dish_id=d.id AND i.status='approved'
 		LEFT JOIN tray_published p ON p.dish_id=d.id
@@ -61,7 +64,7 @@ func (s *SQLiteStore) menuForDate(ctx context.Context, date string) (map[string]
 		var d menuDish
 		if err := rows.Scan(&meal, &d.ID, &d.PhotoID, &d.Name, &d.Kind, &d.Course, &d.TranslatedName, &d.ShortDescription,
 			&d.Description, &ingredients, &sources, &d.NeedsReview, &d.ImageURL, &d.ImageSource,
-			&d.ImageAuthor, &d.ImageLicense, &d.ImageLicenseURL, &d.ImageStatus); err != nil {
+			&d.ImageAuthor, &d.ImageLicense, &d.ImageLicenseURL, &d.ImageStatus, &d.ImageRotation, &d.trayRotation); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(ingredients), &d.Ingredients)
@@ -182,6 +185,7 @@ func newMenuHandler(store *SQLiteStore, token string, photoOptions ...*trayPhoto
 				}
 				if d.PhotoID != "" {
 					d.ImageURL, d.ImageKind, d.ImageStatus = "/api/tray-photo/"+d.PhotoID, "cafeteria", "approved"
+					d.ImageRotation = d.trayRotation
 					d.ImageSource, d.ImageAuthor, d.ImageLicense, d.ImageLicenseURL = "", "", "", ""
 				}
 			}

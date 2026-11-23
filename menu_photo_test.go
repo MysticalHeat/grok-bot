@@ -109,3 +109,98 @@ func TestMenuModeratorRemovesDishImage(t *testing.T) {
 		t.Fatalf("newly approved photo not visible: %+v", d)
 	}
 }
+
+func TestMenuModeratorRotatesDishImage(t *testing.T) {
+	store := testStore(t)
+	now := time.Now()
+	const first = "2026-11-21"
+	const second = "2026-11-22"
+	const imageURL = "https://example.com/rice.jpg"
+	schedule := map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 1, MenuName: "Рис"}, {MenuID: 2, MenuName: "Суп"}}}
+	if err := store.saveCafeteriaWeek(context.Background(), []CafeteriaWeeklyPlan{
+		{Date: first, MenusByMealType: schedule},
+		{Date: second, MenusByMealType: schedule},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := store.db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO cafeteria_images(dish_id,image_url,author,status,checked_at)
+		VALUES (1,?,'Photographer','approved',0),(2,?,'Photographer','approved',0)`, imageURL, imageURL)
+
+	p := &trayPhotos{store: store, now: func() time.Time { return now }, admins: map[int64]bool{123: true}}
+	handler := newMenuHandler(store, "token", p)
+	req := func(method, path string, user int64, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, nil)
+		if user != 0 {
+			r.Header.Set("X-Telegram-Init-Data", signedInitDataForUser("token", now, user))
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s as %d: got %d, want %d: %s", method, path, user, w.Code, want, w.Body)
+		}
+		return w
+	}
+	menu := func(date string, wantAngle int, wantPhotoID, wantAuthor string) {
+		t.Helper()
+		var data struct {
+			Meals map[string][]struct {
+				PhotoID  string `json:"photo_id"`
+				Author   string `json:"image_author"`
+				Rotation int    `json:"image_rotation"`
+			}
+		}
+		if err := json.Unmarshal(req("GET", "/api/menu?date="+date, 321, 200).Body.Bytes(), &data); err != nil {
+			t.Fatal(err)
+		}
+		items := data.Meals["LUNCH"]
+		if d := items[0]; d.Rotation != wantAngle || d.PhotoID != wantPhotoID || d.Author != wantAuthor {
+			t.Fatalf("first dish on %s: got %+v, want angle %d, photo %q, author %q", date, d, wantAngle, wantPhotoID, wantAuthor)
+		}
+		if items[1].Rotation != 0 {
+			t.Fatalf("rotation leaked to another dish: %+v", items[1])
+		}
+	}
+
+	const path = "/api/menu/dish/1/image"
+	example := path + "?image_url=" + url.QueryEscape(imageURL)
+	req("PATCH", example+"&rotation=90", 0, 403)
+	req("PATCH", example+"&rotation=90", 321, 403)
+	req("PATCH", example, 123, 400)
+	req("PATCH", example+"&rotation=45", 123, 400)
+	req("PATCH", path+"?rotation=90", 123, 400)
+	req("PATCH", example+"&photo_id=ambiguous&rotation=90", 123, 400)
+	req("PATCH", example+"-stale&rotation=90", 123, 409)
+	menu(first, 0, "", "Photographer")
+	req("PATCH", example+"&rotation=270", 123, 204)
+	menu(first, 270, "", "Photographer")
+	menu(second, 270, "", "Photographer")
+
+	exec(`INSERT INTO tray_published(dish_id,photo_id,jpeg) VALUES (1,'new-photo',X'00')`)
+	tray := path + "?photo_id=new-photo"
+	req("PATCH", example+"&rotation=90", 123, 409) // A tray photo is now visible.
+	req("PATCH", path+"?photo_id=stale&rotation=90", 123, 409)
+	menu(first, 0, "new-photo", "")
+	req("PATCH", tray+"&rotation=90", 123, 204)
+	menu(second, 90, "new-photo", "")
+	if got := req("GET", "/api/tray-photo/new-photo", 0, 200).Body.Bytes(); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("rotation changed the original bytes: %x", got)
+	}
+	req("PATCH", tray+"&rotation=0", 123, 204)
+	menu(first, 0, "new-photo", "")
+	req("PATCH", tray+"&rotation=180", 123, 204)
+	req("DELETE", "/api/tray/dish/1?photo_id=new-photo", 123, 204)
+	menu(second, 270, "", "Photographer")
+
+	// Applying migrations again must not clear a saved rotation.
+	if err := store.initCafeteria(); err != nil {
+		t.Fatal(err)
+	}
+	menu(second, 270, "", "Photographer")
+}

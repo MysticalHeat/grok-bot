@@ -112,19 +112,32 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})
-	protected("DELETE /api/menu/dish/{id}/image", func(w http.ResponseWriter, r *http.Request, id int64) {
+	editDishImage := func(w http.ResponseWriter, r *http.Request, id int64) {
 		query := r.URL.Query()
 		photoID, imageURL := query.Get("photo_id"), query.Get("image_url")
 		if (photoID == "") == (imageURL == "") {
 			http.Error(w, "provide exactly one image identifier", http.StatusBadRequest)
 			return
 		}
-		if err := p.store.removeMenuDishImage(r.Context(), id, photoID, imageURL, p.now()); err != nil {
+		var err error
+		if r.Method == http.MethodPatch {
+			rotation, parseErr := strconv.Atoi(query.Get("rotation"))
+			if parseErr != nil || rotation < 0 || rotation > 270 || rotation%90 != 0 {
+				http.Error(w, "invalid image rotation", http.StatusBadRequest)
+				return
+			}
+			err = p.store.setMenuDishImageRotation(r.Context(), id, photoID, imageURL, rotation)
+		} else {
+			err = p.store.removeMenuDishImage(r.Context(), id, photoID, imageURL, p.now())
+		}
+		if err != nil {
 			trayHTTPError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}
+	protected("PATCH /api/menu/dish/{id}/image", editDishImage)
+	protected("DELETE /api/menu/dish/{id}/image", editDishImage)
 	protected("DELETE /api/tray/dish/{id}", func(w http.ResponseWriter, r *http.Request, id int64) {
 		res, err := p.store.db.ExecContext(r.Context(), `DELETE FROM tray_published WHERE dish_id=? AND photo_id=?`, id, r.URL.Query().Get("photo_id"))
 		if err != nil {

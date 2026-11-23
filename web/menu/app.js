@@ -8,7 +8,8 @@
   const dateElement = document.querySelector('#date');
   const dialog = document.querySelector('#dish-dialog');
   const dialogContent = document.querySelector('#dish-dialog-content');
-  let date = '', requestedDate = '', request, photoAdmin = false;
+  let date = '', requestedDate = '', request, photoAdmin = false, menuData, openPhoto;
+  const thumbnails = new WeakMap();
 
   const element = (tag, text, className) => {
     const node = document.createElement(tag);
@@ -31,20 +32,52 @@
     const a = link(label, value);
     if (a) { const p = element('p'); p.append(a); parent.append(p); }
   };
-  function removeImageControl(dish, content) {
-    const button = element('button', 'Удалить фото', 'remove-dish-image');
-    button.type = 'button';
+  const sameImage = (a, b) => a.id === b.id && a.photo_id === b.photo_id && a.image_url === b.image_url;
+  function orientImage(frame, rotation = 0) {
+    frame.style.setProperty('--dish-image-angle', `${rotation}deg`);
+    frame.classList.toggle('is-quarter-turn', rotation % 180 !== 0);
+  }
+  function updateRotation(dish, rotation) {
+    dish.image_rotation = rotation;
+    for (const dishes of Object.values(menuData?.meals || {})) {
+      for (const item of dishes) {
+        if (!sameImage(item, dish)) continue;
+        item.image_rotation = rotation;
+        const thumb = thumbnails.get(item);
+        if (thumb) orientImage(thumb, rotation);
+      }
+    }
+    if (openPhoto && sameImage(openPhoto.dish, dish)) {
+      openPhoto.dish.image_rotation = rotation;
+      orientImage(openPhoto.frame, rotation);
+    }
+  }
+  function dishImageControls(dish) {
+    const tools = element('div', '', 'dish-image-tools');
+    tools.setAttribute('role', 'group');
+    tools.setAttribute('aria-label', 'Редактирование фото блюда');
     const feedback = element('p', '', 'note');
     feedback.setAttribute('role', 'status');
-    button.addEventListener('click', async () => {
-      const name = dish.translated_name || dish.name;
-      if (!window.confirm('Удалить фото блюда «' + name + '» из меню на все даты? Автоматическая замена не появится.')) return;
-      button.disabled = true;
+    const left = element('button', '↶ Влево');
+    const right = element('button', '↷ Вправо');
+    left.setAttribute('aria-label', 'Повернуть фото на 90° влево');
+    right.setAttribute('aria-label', 'Повернуть фото на 90° вправо');
+    const remove = element('button', 'Удалить фото', 'remove-dish-image');
+    const buttons = [left, right, remove];
+    for (const button of buttons) button.type = 'button';
+    async function edit(rotation) {
+      const removing = rotation === undefined;
+      if (removing) {
+        const name = dish.translated_name || dish.name;
+        if (!window.confirm('Удалить фото блюда «' + name + '» из меню на все даты? Автоматическая замена не появится.')) return;
+      }
+      buttons.forEach(button => { button.disabled = true; });
       feedback.textContent = '';
       const query = new URLSearchParams(dish.photo_id ? { photo_id: dish.photo_id } : { image_url: dish.image_url });
+      if (!removing) query.set('rotation', rotation);
       try {
         const response = await fetch('/api/menu/dish/' + encodeURIComponent(dish.id) + '/image?' + query, {
-          method: 'DELETE', headers: { 'X-Telegram-Init-Data': initData },
+          method: removing ? 'DELETE' : 'PATCH', headers: { 'X-Telegram-Init-Data': initData },
         });
         if (response.status === 409) {
           feedback.textContent = 'Фото уже изменилось. Закройте карточку и обновите меню.';
@@ -55,15 +88,26 @@
           return;
         }
         if (!response.ok) throw new Error('HTTP ' + response.status);
-        if (dialog.open && dialogContent.contains(button)) dialog.close();
-        load(requestedDate);
+        if (removing) {
+          if (dialog.open && openPhoto && sameImage(openPhoto.dish, dish)) dialog.close();
+          load(requestedDate);
+        } else {
+          updateRotation(dish, rotation);
+          feedback.textContent = 'Поворот сохранён.';
+        }
       } catch {
-        feedback.textContent = 'Не удалось удалить фото. Попробуйте ещё раз.';
+        feedback.textContent = removing ? 'Не удалось удалить фото. Попробуйте ещё раз.' : 'Не удалось повернуть фото. Попробуйте ещё раз.';
       } finally {
-        button.disabled = false;
+        buttons.forEach(button => { button.disabled = false; });
       }
-    });
-    content.append(button, feedback);
+    }
+    left.addEventListener('click', () => edit(((dish.image_rotation || 0) + 270) % 360));
+    right.addEventListener('click', () => edit(((dish.image_rotation || 0) + 90) % 360));
+    remove.addEventListener('click', () => edit());
+    tools.append(...buttons);
+    const panel = element('div', '', 'dish-image-panel');
+    panel.append(tools, feedback);
+    return panel;
   }
   function dishCard(dish) {
     const card = element('button', '', 'dish-card');
@@ -75,10 +119,14 @@
       return node;
     };
     if (imageURL && dish.image_status !== 'not_found') {
-      const img = element('img', '', 'thumb');
+      const frame = element('div', '', 'thumb dish-thumb');
+      const img = element('img');
       img.src = imageURL; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
-      img.onerror = () => img.replaceWith(placeholder());
-      card.append(img);
+      img.onerror = () => frame.replaceWith(placeholder());
+      frame.append(img);
+      thumbnails.set(dish, frame);
+      orientImage(frame, dish.image_rotation);
+      card.append(frame);
     } else card.append(placeholder());
     const title = element('div');
     title.append(element('div', dish.translated_name || dish.name, 'dish-title'));
@@ -91,12 +139,18 @@
   }
   function openDish(dish) {
     dialogContent.replaceChildren();
+    openPhoto = null;
     const imageURL = dish.image_status !== 'not_found' ? safeURL(dish.image_url) : '';
     if (imageURL) {
+      const frame = element('div', '', 'dish-photo');
       const img = element('img', '', 'dialog-image');
       img.src = imageURL; img.alt = dish.image_kind === 'cafeteria' ? 'Фото блюда из столовой' : 'Пример изображения блюда'; img.referrerPolicy = 'no-referrer';
-      img.onerror = () => img.remove();
-      dialogContent.append(img);
+      img.onerror = () => frame.remove();
+      orientImage(frame, dish.image_rotation);
+      frame.append(img);
+      openPhoto = { dish, frame };
+      dialogContent.append(frame);
+      if (photoAdmin) dialogContent.append(dishImageControls(dish));
     }
     const content = element('div', '', 'content');
     const heading = element('h2', dish.translated_name || dish.name);
@@ -118,7 +172,6 @@
     }
     (dish.sources || []).forEach((source, i) => addLink(content, 'Источник описания ' + (i + 1), source));
     if (!dish.short_description && !dish.description && !dish.ingredients?.length && !imageURL && !dish.sources?.length) content.append(element('p', 'Подробности пока не подготовлены.', 'note'));
-    if (photoAdmin && imageURL) removeImageControl(dish, content);
     dialogContent.append(content);
     dialog.showModal();
   }
@@ -163,7 +216,7 @@
       const response = await fetch('/api/menu' + (value ? '?date=' + encodeURIComponent(value) : ''), { headers: { 'X-Telegram-Init-Data': initData }, signal: request.signal, cache: 'no-store' });
       if (response.status === 401) { status.textContent = 'Не удалось подтвердить Telegram. Закройте и снова откройте меню через бота.'; return; }
       if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await response.json(); date = data.date; photoAdmin = data.photo_admin;
+      const data = await response.json(); date = data.date; photoAdmin = data.photo_admin; menuData = data;
       dateElement.textContent = new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(date + 'T12:00:00Z'));
       render(data);
       window.dispatchEvent(new CustomEvent('menu:loaded', { detail: data }));

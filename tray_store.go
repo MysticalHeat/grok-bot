@@ -458,7 +458,7 @@ func (p *trayPhotos) publishTray(ctx context.Context, id int64, crops []trayCrop
 			return errTrayConflict
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tray_published(dish_id,photo_id,jpeg) VALUES(?,?,?)
-			ON CONFLICT(dish_id) DO UPDATE SET photo_id=excluded.photo_id,jpeg=excluded.jpeg`, c.DishID, trayPhotoID(), encoded[i]); err != nil {
+			ON CONFLICT(dish_id) DO UPDATE SET photo_id=excluded.photo_id,jpeg=excluded.jpeg,rotation=0`, c.DishID, trayPhotoID(), encoded[i]); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tray_publication_crops(tray_id,dish_id,x,y,w,h,rotation) VALUES(?,?,?,?,?,?,?)

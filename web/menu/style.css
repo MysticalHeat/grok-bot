@@ -30,13 +30,20 @@ h2 { font-size: 20px; margin: 0 0 12px; }
 .date-arrow:focus-visible, .dish-card:focus-visible, .dialog-close:focus-visible { outline: 3px solid var(--tg-theme-button-color, #5188e8); outline-offset: 2px; }
 .thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; flex: none; }
 .thumb-placeholder { display: grid; place-items: center; background: var(--tg-theme-secondary-bg-color, #f3f5f7); font-size: 26px; }
+.dish-thumb { overflow: hidden; }
+.dish-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; transform: rotate(var(--dish-image-angle, 0deg)); }
 .dish-title { font-weight: 650; }
 .original, .description, .note { color: var(--tg-theme-hint-color, #77808d); font-size: 13px; margin-top: 4px; }
 .content { padding: 20px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .content h2 { margin: 0 0 4px; }
 .content p { margin: 8px 0; }
-.remove-dish-image { margin-top: 8px; padding: 0 12px; background: transparent; color: var(--tg-theme-destructive-text-color, #da4848); border: 1px solid currentColor; }
-.remove-dish-image:disabled { opacity: .6; cursor: default; }
+.dish-image-panel { margin: 0 20px; padding: 12px 0; border-bottom: 1px solid var(--tg-theme-secondary-bg-color, #f3f5f7); }
+.dish-image-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.dish-image-tools button { min-height: 44px; padding: 0 10px; font-size: 14px; }
+.dish-image-tools button:disabled { opacity: .6; cursor: default; }
+.dish-image-panel .note { margin: 8px 0 0; }
+.dish-image-panel .note:empty { margin: 0; }
+.remove-dish-image { background: transparent; color: var(--tg-theme-destructive-text-color, #da4848); border: 1px solid currentColor; }
 dialog {
   position: fixed;
   width: min(100% - 32px, 520px);
@@ -52,6 +59,9 @@ dialog {
 }
 dialog::backdrop { background: rgb(0 0 0 / 60%); }
 .dialog-image { display: block; width: 100%; max-height: 320px; object-fit: cover; }
+.dish-photo { overflow: hidden; }
+.dish-photo .dialog-image { transform: rotate(var(--dish-image-angle, 0deg)); }
+.dish-photo.is-quarter-turn .dialog-image { width: min(100%, 320px); aspect-ratio: 1; margin-inline: auto; object-fit: contain; }
 .dialog-close { position: sticky; top: 12px; float: right; margin: 12px 12px -54px 0; z-index: 1; min-width: 42px; min-height: 42px; font-size: 26px; line-height: 1; background: var(--tg-theme-secondary-bg-color, #f3f5f7); color: var(--tg-theme-text-color, #20232a); }
 a { color: var(--tg-theme-link-color, #5188e8); }
 #tray-open { width: 100%; margin-top: 12px; padding: 8px 12px; }
