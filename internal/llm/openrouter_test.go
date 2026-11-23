@@ -100,11 +100,14 @@ func TestOpenRouterUsageAndMaxTokens(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.MaxTokens != 512 {
 			t.Fatalf("payload=%+v error=%v", payload, err)
 		}
-		body := `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1200,"completion_tokens":100,"cost":0.003}}`
+		body := `{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1200,"completion_tokens":100,"cost":0.003}}`
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	})}}
 	response, err := c.Generate(context.Background(), Request{Model: "test", MaxTokens: 512, Contents: []Content{{Role: "user", Parts: []Part{{Text: "hello"}}}}})
 	if err != nil || response.Usage == nil || response.Usage.Cost == nil || *response.Usage.Cost != 0.003 || response.Usage.PromptTokens != 1200 {
 		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	if response.FinishReason != "length" {
+		t.Fatalf("finish reason = %q; want length", response.FinishReason)
 	}
 }

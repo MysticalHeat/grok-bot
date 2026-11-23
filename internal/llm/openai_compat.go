@@ -149,7 +149,8 @@ type openAIChatResponse struct {
 		} `json:"cost_details"`
 	} `json:"usage"`
 	Choices []struct {
-		Message openAIResponseMessage `json:"message"`
+		Message      openAIResponseMessage `json:"message"`
+		FinishReason string                `json:"finish_reason"`
 	} `json:"choices"`
 }
 type openAIResponseMessage struct {
@@ -245,7 +246,7 @@ func (r openAIChatResponse) toResponse() Response {
 	}
 	m := r.Choices[0].Message
 	text := extractOpenAIText(m.Content)
-	resp := Response{Text: text}
+	resp := Response{Text: text, FinishReason: r.Choices[0].FinishReason}
 	if r.Usage != nil {
 		cost := r.Usage.Cost
 		if r.Usage.IsBYOK {

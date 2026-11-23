@@ -18,6 +18,8 @@ import (
 type trayWorkerAI struct {
 	calls    int
 	response string
+	retry    string
+	finish   string
 	request  llm.Request
 	err      error
 }
@@ -25,7 +27,10 @@ type trayWorkerAI struct {
 func (a *trayWorkerAI) Generate(_ context.Context, r llm.Request) (llm.Response, error) {
 	a.calls++
 	a.request = r
-	return llm.Response{Text: a.response}, a.err
+	if a.calls > 1 && a.retry != "" {
+		return llm.Response{Text: a.retry}, a.err
+	}
+	return llm.Response{Text: a.response, FinishReason: a.finish}, a.err
 }
 
 func trayWorkerFixture(t *testing.T) (*trayPhotos, *trayWorkerAI, time.Time) {
@@ -96,6 +101,56 @@ func TestTrayWorkerInvalidResponseAndRecovery(t *testing.T) {
 	}
 }
 
+func TestTrayWorkerJSONRetry(t *testing.T) {
+	const valid = `{"suggestions":[{"dish_id":7,"x":0,"y":0,"w":500,"h":500,"selected":true,"reason":""}]}`
+	const broken = `{"suggestions":[{"dish_id":7,"x":0`
+	tests := []struct {
+		name, first, retry, finish, wantReason string
+		limit, wantCalls                       int
+	}{
+		{"retry succeeds", broken, valid, "", "", 20, 2},
+		{"empty reply gets a retry", " ", valid, "", "", 20, 2},
+		{"fenced JSON needs no retry", " \n```JSON\r\n" + valid + "\r\n```\n ", "", "", "", 20, 1},
+		{"extra text after fence is not accepted", "```json\n" + valid + "\n```\nDone", broken, "", "некорректный JSON", 20, 2},
+		{"retry also fails", broken, broken, "", "некорректный JSON", 20, 2},
+		{"retry respects quota", broken, valid, "", "некорректный JSON", 1, 1},
+		{"length finish reason causes retry even with valid JSON", `{"suggestions":[]}`, valid, "length", "", 20, 2},
+		{"length finish reason explains truncation when quota is exhausted", broken, valid, "length", "лимит длины ответа", 1, 1},
+		{"valid JSON without suggestions needs no retry", `{"suggestions":[]}`, valid, "", "не предложил ни одной области", 20, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, ai, _ := trayWorkerFixture(t)
+			p.dailyCalls, ai.response, ai.retry = tt.limit, tt.first, tt.retry
+			ai.finish = tt.finish
+			if err := p.trayWorkerPass(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var status, suggestions, reason string
+			if err := p.store.db.QueryRow(`SELECT status,suggestions,reason FROM tray_submissions WHERE id=1`).Scan(&status, &suggestions, &reason); err != nil {
+				t.Fatal(err)
+			}
+			var quota int
+			if err := p.store.db.QueryRow(`SELECT calls FROM tray_ai_calls`).Scan(&quota); err != nil {
+				t.Fatal(err)
+			}
+			if status != "review" || ai.calls != tt.wantCalls || quota != tt.wantCalls {
+				t.Fatalf("status=%s requests=%d quota=%d; want review and %d calls", status, ai.calls, quota, tt.wantCalls)
+			}
+			if tt.wantCalls == 2 && ai.request.MaxTokens <= 2048 {
+				t.Fatalf("retry did not increase the output budget: %d", ai.request.MaxTokens)
+			}
+			if tt.wantReason == "" {
+				if reason != "" || !strings.Contains(suggestions, `"dish_id":7`) {
+					t.Fatalf("missing saved suggestion: %s, reason=%q", suggestions, reason)
+				}
+			} else if suggestions != "[]" || !strings.Contains(reason, tt.wantReason) {
+				t.Fatalf("suggestions=%s reason=%q; want %q and no crops", suggestions, reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestTraySuggestionDiagnostics(t *testing.T) {
 	const valid = `{"dish_id":7,"x":0,"y":0,"w":500,"h":500,"selected":true}`
 	wrap := func(items string) string { return `{"suggestions":[` + items + `]}` }
@@ -118,7 +173,7 @@ func TestTraySuggestionDiagnostics(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, reason := parseTraySuggestions(tt.response, []trayDish{{ID: 7}})
+			got, reason, _ := parseTraySuggestions(tt.response, []trayDish{{ID: 7}})
 			if len(got) != 0 || !strings.Contains(reason, tt.want) {
 				t.Fatalf("crops=%+v, reason=%q; want %q", got, reason, tt.want)
 			}
