@@ -186,13 +186,11 @@ func TestTrayGlobalMealQuota(t *testing.T) {
 	}
 
 	check(upload(date, "DINNER", 1, 7), http.StatusCreated)
+	// The same user can keep uploading on the same day to meals with space.
+	check(upload(date, "DINNER", 1, 8), http.StatusCreated)
+	check(upload(date, "DINNER", 1, 9), http.StatusCreated)
 	check(upload(nextDate, "LUNCH", 1, 8), http.StatusCreated)
-	daily := upload(nextDate, "DINNER", 1, 9)
-	check(daily, http.StatusTooManyRequests)
-	if daily.Body.String() != "daily frame limit reached\n" {
-		t.Fatalf("expected the personal daily limit, got %s", daily.Body)
-	}
-	check(upload(nextDate, "DINNER", 2, 9), http.StatusCreated)
+	check(upload(nextDate, "DINNER", 1, 9), http.StatusCreated)
 }
 
 func TestTrayModeratorRescan(t *testing.T) {

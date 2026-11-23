@@ -70,7 +70,6 @@ const trayColumns = "id,service_date,meal,status,reason,result,status='queued' A
 
 var (
 	errTrayDuplicate     = errors.New("this file was already submitted for this meal")
-	errTrayQuota         = errors.New("daily frame limit reached")
 	errTrayMealLimit     = errors.New("shared meal frame limit reached")
 	errTrayMenu          = errors.New("meal does not have dishes")
 	errTrayConflict      = errors.New("menu, photo or submission changed; reload and review")
@@ -90,7 +89,6 @@ func initTrayPhotos(store *SQLiteStore) error {
 		reason TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '[]',
 		created_at INTEGER NOT NULL, closed_at INTEGER NOT NULL DEFAULT 0,
 		started_at INTEGER NOT NULL DEFAULT 0, UNIQUE(service_date,meal,digest));
-	CREATE INDEX IF NOT EXISTS tray_quota ON tray_submissions(user_id,upload_day);
 	CREATE INDEX IF NOT EXISTS tray_status ON tray_submissions(status,id);
 	CREATE TABLE IF NOT EXISTS tray_notifications (
 		tray_id INTEGER NOT NULL, admin_id INTEGER NOT NULL,
@@ -156,12 +154,11 @@ func (p *trayPhotos) upload(ctx context.Context, user int64, date, meal, digest 
 		return traySummary{}, err
 	}
 	defer tx.Rollback()
-	// Check both quotas on the same SQLite connection and transaction as the insert.
-	var exists, userCount, mealCount int
+	// Keep the shared meal quota check in the same transaction as the insert.
+	var exists, mealCount int
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tray_submissions WHERE service_date=? AND meal=? AND digest=?),
-		(SELECT COUNT(*) FROM tray_submissions WHERE user_id=? AND upload_day=?),
 		(SELECT COUNT(*) FROM tray_submissions WHERE service_date=? AND meal=?)`,
-		date, meal, digest, user, day, date, meal).Scan(&exists, &userCount, &mealCount)
+		date, meal, digest, date, meal).Scan(&exists, &mealCount)
 	switch {
 	case err != nil:
 		return traySummary{}, err
@@ -169,8 +166,6 @@ func (p *trayPhotos) upload(ctx context.Context, user int64, date, meal, digest 
 		return traySummary{}, errTrayDuplicate
 	case mealCount >= trayMealLimit:
 		return traySummary{}, errTrayMealLimit
-	case userCount >= 3:
-		return traySummary{}, errTrayQuota
 	}
 	dishes, err := trayMenuDishes(ctx, tx, date, meal)
 	if err != nil {

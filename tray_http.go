@@ -169,8 +169,6 @@ func trayHTTPError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", 404)
 	case errors.Is(err, errTrayMealLimit):
 		trayJSON(w, http.StatusTooManyRequests, map[string]string{"code": "meal_photo_limit"})
-	case errors.Is(err, errTrayQuota):
-		http.Error(w, err.Error(), 429)
 	case errors.Is(err, errTrayAIBudget):
 		trayJSON(w, http.StatusTooManyRequests, map[string]string{"code": "tray_ai_budget", "message": errTrayAIBudget.Error()})
 	case errors.Is(err, errTrayAIUnavailable):
