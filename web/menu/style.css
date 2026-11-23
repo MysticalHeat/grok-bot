@@ -58,6 +58,7 @@ a { color: var(--tg-theme-link-color, #5188e8); }
 .tray-form[hidden] { display: none; }
 .tray-form, .tray-detail, .crop-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; margin: 12px 0; border-radius: 16px; background: var(--tg-theme-bg-color, #fff); overflow-wrap: anywhere; }
 .tray-form label, .crop-row > label { display: block; }
+.crop-row > label[hidden] { display: none; }
 .tray-form input[type=file], select { max-width: 100%; font: inherit; }
 select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint-color, #77808d); border-radius: 8px; background: var(--tg-theme-bg-color, #fff); color: inherit; }
 .tray-summary { margin: 8px 0; }
@@ -72,6 +73,10 @@ select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint
 .crop-stage img { display: block; width: 100%; height: auto; }
 .crop-boxes { position: absolute; inset: 0; pointer-events: none; }
 .crop-box { position: absolute; border: 2px solid #ffca28; color: #111; background: rgb(255 202 40 / 20%); font-weight: bold; }
+.crop-stage .crop-target { display: flex; min-width: 0; min-height: 0; padding: 0; border-radius: 0; pointer-events: auto; }
+.crop-stage.is-drawing .crop-target { pointer-events: none; }
+.crop-target.is-inspected, .crop-target:focus-visible { outline: 2px solid #111; outline-offset: -4px; }
+.crop-label { position: absolute; inset: 0 0 auto; padding: 5px 8px; color: #fff; background: #20232a; font-size: 13px; line-height: 1.4; pointer-events: none; }
 .crop-draft { border-style: dashed; pointer-events: none; }
 .crop-tools, .crop-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .crop-tools button, .crop-actions button { flex: 1 1 170px; min-height: 44px; }

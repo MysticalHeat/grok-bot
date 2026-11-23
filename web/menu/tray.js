@@ -65,22 +65,56 @@
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
     const img = node('img'); img.alt = 'Фото подноса для разметки'; img.draggable = false;
-    const boxes = node('div', '', 'crop-boxes'); boxes.setAttribute('aria-hidden', 'true');
+    const boxes = node('div', '', 'crop-boxes');
     const draft = node('div', '', 'crop-box crop-draft'); draft.hidden = true; draft.setAttribute('aria-hidden', 'true');
-    stage.append(img, boxes, draft);
+    const label = node('div', '', 'crop-label'); label.hidden = true; label.setAttribute('aria-hidden', 'true');
+    stage.append(img, boxes, draft, label);
     const list = node('div', '', 'crop-list');
-    const hint = node('p', 'Проведите по фото, чтобы прокрутить страницу.', 'crop-hint');
+    const inspectHint = 'Наведите курсор на область или коснитесь её, чтобы увидеть блюдо. Свайп по фото прокручивает страницу.';
+    const hint = node('p', inspectHint, 'crop-hint');
     hint.setAttribute('role', 'status');
     const tools = node('div', '', 'crop-tools');
     target.append(tools, hint, stage, list);
     function placeBox(box, { x, y, w, h }) {
       Object.assign(box.style, { left: `${x / 10}%`, top: `${y / 10}%`, width: `${w / 10}%`, height: `${h / 10}%` });
     }
+    let drawing = false;
+    let activeBox;
+    function showLabel(box) {
+      if (drawing) return;
+      if (activeBox !== box) activeBox?.classList.remove('is-inspected');
+      activeBox = box;
+      box.classList.add('is-inspected');
+      label.textContent = box.getAttribute('aria-label');
+      label.hidden = false;
+    }
+    function hideLabel() {
+      activeBox?.classList.remove('is-inspected');
+      activeBox = undefined;
+      label.hidden = true;
+    }
+    stage.addEventListener('click', event => { if (!boxes.contains(event.target)) hideLabel(); });
+    stage.addEventListener('keydown', event => { if (event.key === 'Escape') hideLabel(); });
     function draw() {
+      hideLabel();
       boxes.replaceChildren(); list.replaceChildren();
       crops.forEach((crop, i) => {
-        const box = node('div', String(i + 1), 'crop-box');
+        const box = button(String(i + 1), () => showLabel(box));
+        box.className = 'crop-box crop-target';
         placeBox(box, crop);
+        let hovered = false;
+        box.addEventListener('pointerenter', event => {
+          if (event.pointerType === 'touch') return;
+          hovered = true;
+          showLabel(box);
+        });
+        box.addEventListener('pointerleave', event => {
+          if (event.pointerType === 'touch') return;
+          hovered = false;
+          if (activeBox === box && !box.matches(':focus-visible')) hideLabel();
+        });
+        box.addEventListener('focus', () => { if (box.matches(':focus-visible')) showLabel(box); });
+        box.addEventListener('blur', () => { if (activeBox === box && !hovered) hideLabel(); });
         boxes.append(box);
         const row = node('div', '', 'crop-row');
         const selectLabel = node('label', ' Использовать область ' + (i + 1));
@@ -90,7 +124,6 @@
         const empty = node('option', 'Выберите блюдо'); empty.value = ''; select.append(empty);
         dishes.forEach(dish => { const option = node('option', dish.name); option.value = String(dish.id); select.append(option); });
         select.value = String(crop.dish_id || '');
-        select.addEventListener('change', () => { crop.dish_id = select.value; crop.replace = false; draw(); });
         dishLabel.append(select); row.append(dishLabel);
         const fields = node('div', '', 'crop-fields');
         [['x', 'Слева'], ['y', 'Сверху'], ['w', 'Ширина'], ['h', 'Высота']].forEach(([key, label]) => {
@@ -100,17 +133,25 @@
           wrap.append(input); fields.append(wrap);
         });
         row.append(fields);
-        const dish = dishes.find(d => String(d.id) === String(crop.dish_id));
-        if (dish?.photo_id) {
-          const replaceLabel = node('label', ' Явно заменить существующее фото');
-          const replace = document.createElement('input'); replace.type = 'checkbox'; replace.checked = crop.replace;
-          replace.addEventListener('change', () => { crop.replace = replace.checked; }); replaceLabel.prepend(replace); row.append(replaceLabel);
+        const replaceLabel = node('label', ' Явно заменить существующее фото');
+        const replace = document.createElement('input'); replace.type = 'checkbox'; replace.checked = crop.replace;
+        replace.addEventListener('change', () => { crop.replace = replace.checked; }); replaceLabel.prepend(replace); row.append(replaceLabel);
+        function updateDish() {
+          const dish = dishes.find(d => String(d.id) === String(crop.dish_id));
+          box.setAttribute('aria-label', `Область ${i + 1}: ${dish?.name || 'Блюдо не выбрано'}`);
+          replaceLabel.hidden = !dish?.photo_id;
+          if (activeBox === box) label.textContent = box.getAttribute('aria-label');
         }
+        select.addEventListener('change', () => {
+          crop.dish_id = select.value;
+          crop.replace = replace.checked = false;
+          updateDish();
+        });
+        updateDish();
         if (crop.reason) row.append(node('p', crop.reason, 'note'));
         row.append(button('Удалить область', () => { crops.splice(i, 1); draw(); })); list.append(row);
       });
     }
-    let drawing = false;
     let gesture;
     const add = button('Выделить на фото', () => setDrawing(!drawing));
     add.disabled = true;
@@ -131,12 +172,14 @@
     function setDrawing(active) {
       clearGesture();
       drawing = active;
+      hideLabel();
+      boxes.inert = active;
       stage.classList.toggle('is-drawing', active);
       add.textContent = active ? 'Отменить выделение' : 'Выделить на фото';
       add.setAttribute('aria-pressed', String(active));
       hint.textContent = active
         ? 'Проведите по диагонали от одного угла области к другому.'
-        : 'Проведите по фото, чтобы прокрутить страницу.';
+        : inspectHint;
     }
     function point(event, bounds) {
       const unit = (offset, size) => Math.max(0, Math.min(1000, Math.round(offset / size * 1000)));
