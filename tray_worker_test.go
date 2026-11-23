@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func TestTrayWorkerInvalidResponseAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reason string
-	if err := p.store.db.QueryRow(`SELECT reason FROM tray_submissions WHERE id=1`).Scan(&reason); err != nil || reason == "" {
+	if err := p.store.db.QueryRow(`SELECT reason FROM tray_submissions WHERE id=1`).Scan(&reason); err != nil || !strings.Contains(reason, "блюда с ID 999 нет") {
 		t.Fatalf("reason=%q err=%v", reason, err)
 	}
 	if _, err := p.store.db.Exec(`UPDATE tray_submissions SET status='queued',started_at=123`); err != nil {
@@ -92,6 +93,51 @@ func TestTrayWorkerInvalidResponseAndRecovery(t *testing.T) {
 	var status string
 	if err := p.store.db.QueryRow(`SELECT status FROM tray_submissions`).Scan(&status); err != nil || status != "review" {
 		t.Fatalf("status=%s err=%v", status, err)
+	}
+}
+
+func TestTraySuggestionDiagnostics(t *testing.T) {
+	const valid = `{"dish_id":7,"x":0,"y":0,"w":500,"h":500,"selected":true}`
+	wrap := func(items string) string { return `{"suggestions":[` + items + `]}` }
+	tests := []struct{ name, response, want string }{
+		{"empty response", "", "пустой ответ"},
+		{"bad JSON", `{"suggestions":[`, "некорректный JSON"},
+		{"missing list", `{}`, "нет массива suggestions"},
+		{"wrong list type", `{"suggestions":"text"}`, "с массивом suggestions"},
+		{"empty list", wrap(""), "не предложил ни одной области"},
+		{"too many items", wrap(strings.Repeat(valid+",", 32) + valid), "Слишком много предложений от ИИ: 33"},
+		{"wrong coordinate type", wrap(strings.Replace(valid, `"x":0`, `"x":"0"`, 1)), "Предложение №1: поле x имеет неверный тип"},
+		{"absent coordinate", wrap(strings.Replace(valid, `"x":0,`, "", 1)), "не хватает координат"},
+		{"unknown dish", wrap(strings.Replace(valid, `"dish_id":7`, `"dish_id":99`, 1)), "блюда с ID 99 нет"},
+		{"no dish selected", wrap(strings.Replace(valid, `"dish_id":7`, `"dish_id":0`, 1)), "выбрана область без указанного блюда"},
+		{"right overflow", wrap(valid + "," + strings.Replace(valid, `"x":0`, `"x":900`, 1)), "Предложение №2: прямоугольник выходит за правый край"},
+		{"bottom overflow", wrap(strings.Replace(valid, `"y":0`, `"y":900`, 1)), "выходит за нижний край"},
+		{"invalid height", wrap(strings.Replace(valid, `"h":500`, `"h":0`, 1)), "высота (h) должна быть больше нуля"},
+		{"duplicate selection", wrap(valid + "," + valid), "Предложение №2: для блюда с ID 7 выбрано несколько областей"},
+		{"missing reason", wrap(strings.Replace(valid, `true`, `false`, 1)), "не объяснил, почему область не выбрана"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, reason := parseTraySuggestions(tt.response, []trayDish{{ID: 7}})
+			if len(got) != 0 || !strings.Contains(reason, tt.want) {
+				t.Fatalf("crops=%+v, reason=%q; want %q", got, reason, tt.want)
+			}
+		})
+	}
+}
+
+func TestTrayWorkerTimeoutDoesNotExposeProviderError(t *testing.T) {
+	p, ai, _ := trayWorkerFixture(t)
+	ai.err = errors.Join(errors.New("private provider details"), context.DeadlineExceeded)
+	if err := p.trayWorkerPass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	if err := p.store.db.QueryRow(`SELECT reason FROM tray_submissions WHERE id=1`).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reason, "не ответил за 90 секунд") || strings.Contains(reason, "private") {
+		t.Fatalf("unexpected diagnostic: %q", reason)
 	}
 }
 

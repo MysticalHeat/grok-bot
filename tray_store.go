@@ -58,21 +58,26 @@ type traySummary struct {
 	Date        string     `json:"date"`
 	Meal        string     `json:"meal"`
 	Status      string     `json:"status"`
+	ScanRunning bool       `json:"scan_running,omitempty"`
+	CanRescan   bool       `json:"can_rescan,omitempty"`
 	Reason      string     `json:"reason,omitempty"`
 	Result      []string   `json:"result"`
 	Dishes      []trayDish `json:"dishes,omitempty"`
 	Suggestions []trayCrop `json:"suggestions,omitempty"`
 }
 
-const trayColumns = "id,service_date,meal,status,reason,result"
+const trayColumns = "id,service_date,meal,status,reason,result,status='queued' AND started_at<>0"
 
 var (
-	errTrayDuplicate = errors.New("this file was already submitted for this meal")
-	errTrayQuota     = errors.New("daily frame limit reached")
-	errTrayMealLimit = errors.New("shared meal frame limit reached")
-	errTrayMenu      = errors.New("meal does not have dishes")
-	errTrayConflict  = errors.New("menu, photo or submission changed; reload and review")
-	errTrayCrop      = errors.New("invalid or duplicate crop")
+	errTrayDuplicate     = errors.New("this file was already submitted for this meal")
+	errTrayQuota         = errors.New("daily frame limit reached")
+	errTrayMealLimit     = errors.New("shared meal frame limit reached")
+	errTrayMenu          = errors.New("meal does not have dishes")
+	errTrayConflict      = errors.New("menu, photo or submission changed; reload and review")
+	errTrayCrop          = errors.New("invalid or duplicate crop")
+	errTrayAIUnavailable = errors.New("ИИ-скан сейчас недоступен.")
+	errTrayAIBudget      = errors.New("Дневной лимит ИИ-сканов исчерпан. Попробуйте завтра или проверьте фото вручную.")
+	errTrayFrameMissing  = errors.New("Исходное фото недоступно для повторного скана.")
 )
 
 func initTrayPhotos(store *SQLiteStore) error {
@@ -172,7 +177,7 @@ func (p *trayPhotos) upload(ctx context.Context, user int64, date, meal, digest 
 	}
 	snapshot, _ := json.Marshal(dishes)
 	sub := traySummary{Date: date, Meal: meal, Status: "queued", Result: []string{}}
-	if p.ai == nil {
+	if !p.trayAIEnabled() {
 		sub.Status = "review"
 	}
 	err = tx.QueryRowContext(ctx, `INSERT INTO tray_submissions(user_id,service_date,meal,upload_day,digest,frame,dishes,status,created_at)
@@ -197,8 +202,68 @@ func (p *trayPhotos) upload(ctx context.Context, user int64, date, meal, digest 
 }
 
 func validTrayCrop(c trayCrop) bool {
-	return c.X >= 0 && c.Y >= 0 && c.X < 1000 && c.Y < 1000 &&
-		c.W > 0 && c.H > 0 && c.W <= 1000-c.X && c.H <= 1000-c.Y
+	return trayCropIssue(c) == ""
+}
+
+func trayCropIssue(c trayCrop) string {
+	switch {
+	case c.X < 0 || c.X >= 1000:
+		return "координата слева (x) должна быть от 0 до 999"
+	case c.Y < 0 || c.Y >= 1000:
+		return "координата сверху (y) должна быть от 0 до 999"
+	case c.W <= 0:
+		return "ширина (w) должна быть больше нуля"
+	case c.H <= 0:
+		return "высота (h) должна быть больше нуля"
+	case c.W > 1000-c.X:
+		return "прямоугольник выходит за правый край фото (x + w > 1000)"
+	case c.H > 1000-c.Y:
+		return "прямоугольник выходит за нижний край фото (y + h > 1000)"
+	default:
+		return ""
+	}
+}
+
+func (p *trayPhotos) requeueTray(ctx context.Context, id int64) error {
+	if !p.trayAIEnabled() {
+		return errTrayAIUnavailable
+	}
+	tx, err := p.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status, frame string
+	if err := tx.QueryRowContext(ctx, `SELECT status,frame FROM tray_submissions WHERE id=?`, id).Scan(&status, &frame); err != nil {
+		return err
+	}
+	if status != "review" {
+		return errTrayConflict
+	}
+	path, err := trayFramePath(p.frames, frame)
+	if err != nil {
+		return errTrayFrameMissing
+	}
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return errTrayFrameMissing
+	}
+	var calls int
+	day, limit := p.trayCallQuota()
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT calls FROM tray_ai_calls WHERE day=?),0)`, day).Scan(&calls); err != nil {
+		return err
+	}
+	if calls >= limit {
+		return errTrayAIBudget
+	}
+	// Reset the claim only for a new, explicit scan. The worker still reserves
+	// the call against the daily limit and never repeats an interrupted claim.
+	if _, err := tx.ExecContext(ctx, `UPDATE tray_submissions SET status='queued',started_at=0,suggestions='[]',reason='' WHERE id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tray_notifications WHERE tray_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop) error {

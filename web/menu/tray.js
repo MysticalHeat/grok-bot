@@ -26,6 +26,7 @@
     if (!response.ok) {
       if (response.status === 429) {
         const result = await response.json().catch(() => null);
+        if (result?.code === 'tray_ai_budget') throw new Error(result.message);
         throw new Error(result?.code === 'meal_photo_limit'
           ? 'Для этого приёма пищи уже отправили три фото. Выберите другой приём пищи или дату.'
           : 'Вы достигли личного лимита загрузок на сегодня.');
@@ -37,31 +38,72 @@
   }
   const message = (target, error) => { target.textContent = error.message || 'Произошла ошибка.'; };
   function summaryText(item) {
-    return `${dateLabel(item.date)}, ${labels[item.meal] || item.meal} — ${statuses[item.status] || item.status}`;
+    const status = item.scan_running ? 'ИИ сканирует' : statuses[item.status] || item.status;
+    return `${dateLabel(item.date)}, ${labels[item.meal] || item.meal} — ${status}`;
   }
   async function showDetail(id, target) {
-    const visible = () => target.isConnected && (moderation || root.open);
-    if (!visible()) return;
+    if (!target.isConnected || (!moderation && !root.open)) return;
     const version = ++detailVersion;
+    const visible = () => version === detailVersion && target.isConnected && (moderation || root.open);
+    const path = '/api/tray/' + encodeURIComponent(id);
+    const load = async () => (await api(path)).json();
     revoke(); target.replaceChildren(node('p', 'Загрузка…'));
     try {
-      const item = await (await api('/api/tray/' + encodeURIComponent(id))).json();
-      if (!visible() || version !== detailVersion) return;
+      await render(await load(), true);
+    } catch (error) { if (visible()) message(target, error); }
+
+    async function render(item, scroll) {
+      if (!visible()) return;
       target.replaceChildren(node('h3', summaryText(item)));
-      target.scrollIntoView({ block: 'start' });
+      if (scroll) target.scrollIntoView({ block: 'start' });
       if (item.result?.length) target.append(node('p', 'Опубликовано: ' + item.result.join(', ')));
       else if (item.status === 'closed') target.append(node('p', 'Фото не опубликовано.'));
       if (item.reason) target.append(node('p', item.reason, 'note'));
-      if (!moderation || item.status !== 'review') return;
-      const frame = await (await api('/api/tray/' + encodeURIComponent(id) + '/frame')).blob();
-      if (!visible() || version !== detailVersion) return;
-      frameURL = URL.createObjectURL(frame);
+      if (!moderation) return;
+      if (item.status === 'queued') {
+        const status = node('p', '', 'note');
+        status.setAttribute('role', 'status');
+        target.append(status);
+        function wait(running) {
+          status.textContent = running ? 'ИИ проверяет фото. Результат появится здесь.' : 'Фото ждёт ИИ-скана. Результат появится здесь.';
+          setTimeout(async () => {
+            if (!visible()) return;
+            try {
+              const latest = await load();
+              if (!visible()) return;
+              if (latest.status === 'queued') {
+                target.firstElementChild.textContent = summaryText(latest);
+                wait(latest.scan_running);
+                return;
+              }
+              await render(latest, false);
+              refreshQueue();
+            } catch (error) {
+              if (!visible()) return;
+              message(status, error);
+              status.after(button('Проверить статус', () => showDetail(id, target)));
+            }
+          }, 3000);
+        }
+        wait(item.scan_running);
+        return;
+      }
+      if (item.status !== 'review') return;
+      try {
+        const frame = await (await api(path + '/frame')).blob();
+        if (!visible()) return;
+        frameURL = URL.createObjectURL(frame);
+      } catch {
+        if (!visible()) return;
+        target.append(node('p', 'Не удалось открыть исходное фото. Попробуйте открыть заявку заново.', 'tray-error'));
+      }
       editor(item, target, frameURL);
-    } catch (error) { if (version === detailVersion) message(target, error); }
+    }
   }
   function editor(item, target, url) {
     const dishes = item.dishes || [];
     const crops = (item.suggestions || []).map(s => ({ ...s, selected: !!s.selected, replace: false }));
+    const original = JSON.stringify(crops);
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
     const img = node('img'); img.alt = 'Фото подноса для разметки'; img.draggable = false;
@@ -72,7 +114,7 @@
     const hint = node('p', 'Проведите по фото, чтобы прокрутить страницу.', 'crop-hint');
     hint.setAttribute('role', 'status');
     const tools = node('div', '', 'crop-tools');
-    target.append(tools, hint, stage, list);
+    if (url) target.append(tools, hint, stage, list);
     function placeBox(box, { x, y, w, h }) {
       Object.assign(box.style, { left: `${x / 10}%`, top: `${y / 10}%`, width: `${w / 10}%`, height: `${h / 10}%` });
     }
@@ -120,7 +162,7 @@
       add.disabled = false;
     });
     img.addEventListener('error', () => { hint.textContent = 'Не удалось открыть фото. Попробуйте открыть заявку заново.'; });
-    img.src = url;
+    if (url) img.src = url;
 
     function clearGesture() {
       const id = gesture?.id;
@@ -186,6 +228,21 @@
     tools.append(add, manual);
     const submit = button('Опубликовать выбранные области', () => decide(false));
     const close = button('Закрыть без публикации', () => decide(true));
+    const rescan = button('Повторить ИИ-скан', async () => {
+      if (JSON.stringify(crops) !== original && !confirm('Повторный ИИ-скан заменит разметку. Несохранённые правки будут потеряны. Продолжить?')) return;
+      setBusy(true);
+      try {
+        await api('/api/tray/' + encodeURIComponent(item.id) + '/rescan', { method: 'POST' });
+        if (target.contains(error)) await showDetail(item.id, target);
+        refreshQueue();
+      } catch (e) { setBusy(false); message(error, e); }
+    });
+    function setBusy(busy) {
+      submit.disabled = !url || busy;
+      close.disabled = rescan.disabled = busy;
+      tools.inert = stage.inert = list.inert = busy;
+      if (busy) error.textContent = '';
+    }
     async function decide(empty) {
       const chosen = empty ? [] : crops.filter(c => c.selected);
       if (!empty && !chosen.length) { error.textContent = 'Выберите хотя бы одну область или закройте без публикации.'; return; }
@@ -197,17 +254,20 @@
         ids.add(String(dish.id));
       }
       if (empty && !confirm('Закрыть заявку без публикации?')) return;
-      submit.disabled = close.disabled = true; error.textContent = '';
+      setBusy(true);
       try {
         await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crops: chosen.map(c => { const dish = dishes.find(d => String(d.id) === String(c.dish_id)); return { dish_id: dish.id, x: c.x, y: c.y, w: c.w, h: c.h, replace: c.replace ? dish.photo_id : '' }; }) }) });
         if (target.contains(error)) await showDetail(item.id, target);
         refreshQueue();
         if (document.querySelector('#moderation-published').open) refreshPublished();
-      } catch (e) { message(error, e); submit.disabled = close.disabled = false; }
+      } catch (e) { setBusy(false); message(error, e); }
     }
     const actions = node('div', '', 'crop-actions');
-    actions.append(submit, close);
-    target.append(actions, error); draw();
+    if (item.can_rescan) actions.append(rescan);
+    if (url) actions.append(submit);
+    actions.append(close);
+    target.append(actions, error);
+    if (url) draw();
   }
   function openTray() {
     if (!menu?.photos_enabled || opener.disabled || root.open) return;
