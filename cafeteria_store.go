@@ -186,6 +186,7 @@ func (s *SQLiteStore) claimCafeteriaJob(ctx context.Context, now time.Time, toke
 	var j cafeteriaJob
 	err := s.db.QueryRowContext(ctx, `UPDATE cafeteria_jobs SET status='running',lease_until=?,lease_token=?,attempts=attempts+1,updated_at=?
 		WHERE id=(SELECT id FROM cafeteria_jobs WHERE available_at<=? AND (status='pending' OR (status='running' AND lease_until<=?))
+		AND (kind<>'image' OR NOT EXISTS (SELECT 1 FROM cafeteria_images i WHERE i.dish_id=cafeteria_jobs.dish_id AND i.status='removed'))
 		AND NOT EXISTS (SELECT 1 FROM cafeteria_source_cooldowns c WHERE c.until>? AND ((kind='image' AND c.host='commons.wikimedia.org') OR (kind='reference' AND c.host='ko.wikipedia.org')))
 		ORDER BY available_at,id LIMIT 1)
 		RETURNING id,dish_id,kind,attempts`, now.Add(5*time.Minute).Unix(), token, now.Unix(), now.Unix(), now.Unix(), now.Unix()).Scan(&j.ID, &j.DishID, &j.Kind, &j.Attempts)
@@ -287,6 +288,44 @@ func (s *SQLiteStore) saveCafeteriaCard(ctx context.Context, j *cafeteriaJob, c 
 }
 
 type cafeteriaImage struct{ URL, SourceURL, Author, License, LicenseURL, Caption, Status string }
+
+// Remove the image the moderator saw, suppressing the automatic example even
+// when a tray photo was shown. A moderator can still publish a new tray crop.
+func (s *SQLiteStore) removeMenuDishImage(ctx context.Context, dishID int64, photoID, imageURL string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO cafeteria_images(dish_id,status,checked_at)
+		SELECT d.id,'removed',? FROM cafeteria_dishes d
+		LEFT JOIN tray_published p ON p.dish_id=d.id
+		LEFT JOIN cafeteria_images i ON i.dish_id=d.id AND i.status='approved'
+		WHERE d.id=? AND ((p.photo_id=?) OR (p.photo_id IS NULL AND i.image_url=? AND i.image_url<>''))
+		ON CONFLICT(dish_id) DO UPDATE SET status='removed',checked_at=excluded.checked_at,
+			image_url='',source_url='',author='',license='',license_url='',caption=''`, now.Unix(), dishID, photoID, imageURL)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errTrayConflict
+	}
+	if photoID != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tray_published WHERE dish_id=? AND photo_id=?`, dishID, photoID); err != nil {
+			return err
+		}
+	}
+	// Revoke a running image job's lease so it cannot overwrite the removal.
+	if _, err := tx.ExecContext(ctx, `UPDATE cafeteria_jobs SET status='done',lease_until=0,lease_token='',last_error='',updated_at=?
+		WHERE dish_id=? AND kind='image'`, now.Unix(), dishID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 func (s *SQLiteStore) saveCafeteriaImage(ctx context.Context, j *cafeteriaJob, image cafeteriaImage) error {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO cafeteria_images(dish_id,image_url,source_url,author,license,license_url,caption,status,checked_at)

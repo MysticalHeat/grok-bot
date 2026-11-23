@@ -92,6 +92,19 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})
+	protected("DELETE /api/menu/dish/{id}/image", func(w http.ResponseWriter, r *http.Request, id int64) {
+		query := r.URL.Query()
+		photoID, imageURL := query.Get("photo_id"), query.Get("image_url")
+		if (photoID == "") == (imageURL == "") {
+			http.Error(w, "provide exactly one image identifier", http.StatusBadRequest)
+			return
+		}
+		if err := p.store.removeMenuDishImage(r.Context(), id, photoID, imageURL, p.now()); err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	protected("DELETE /api/tray/dish/{id}", func(w http.ResponseWriter, r *http.Request, id int64) {
 		res, err := p.store.db.ExecContext(r.Context(), `DELETE FROM tray_published WHERE dish_id=? AND photo_id=?`, id, r.URL.Query().Get("photo_id"))
 		if err != nil {

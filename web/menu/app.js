@@ -8,7 +8,7 @@
   const dateElement = document.querySelector('#date');
   const dialog = document.querySelector('#dish-dialog');
   const dialogContent = document.querySelector('#dish-dialog-content');
-  let date = '', request;
+  let date = '', requestedDate = '', request, photoAdmin = false;
 
   const element = (tag, text, className) => {
     const node = document.createElement(tag);
@@ -31,6 +31,40 @@
     const a = link(label, value);
     if (a) { const p = element('p'); p.append(a); parent.append(p); }
   };
+  function removeImageControl(dish, content) {
+    const button = element('button', 'Удалить фото', 'remove-dish-image');
+    button.type = 'button';
+    const feedback = element('p', '', 'note');
+    feedback.setAttribute('role', 'status');
+    button.addEventListener('click', async () => {
+      const name = dish.translated_name || dish.name;
+      if (!window.confirm('Удалить фото блюда «' + name + '» из меню на все даты? Автоматическая замена не появится.')) return;
+      button.disabled = true;
+      feedback.textContent = '';
+      const query = new URLSearchParams(dish.photo_id ? { photo_id: dish.photo_id } : { image_url: dish.image_url });
+      try {
+        const response = await fetch('/api/menu/dish/' + encodeURIComponent(dish.id) + '/image?' + query, {
+          method: 'DELETE', headers: { 'X-Telegram-Init-Data': initData },
+        });
+        if (response.status === 409) {
+          feedback.textContent = 'Фото уже изменилось. Закройте карточку и обновите меню.';
+          return;
+        }
+        if (response.status === 403) {
+          feedback.textContent = 'Не удалось подтвердить права модератора. Откройте меню заново через бота.';
+          return;
+        }
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        if (dialog.open && dialogContent.contains(button)) dialog.close();
+        load(requestedDate);
+      } catch {
+        feedback.textContent = 'Не удалось удалить фото. Попробуйте ещё раз.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+    content.append(button, feedback);
+  }
   function dishCard(dish) {
     const card = element('button', '', 'dish-card');
     card.type = 'button';
@@ -84,6 +118,7 @@
     }
     (dish.sources || []).forEach((source, i) => addLink(content, 'Источник описания ' + (i + 1), source));
     if (!dish.short_description && !dish.description && !dish.ingredients?.length && !imageURL && !dish.sources?.length) content.append(element('p', 'Подробности пока не подготовлены.', 'note'));
+    if (photoAdmin && imageURL) removeImageControl(dish, content);
     dialogContent.append(content);
     dialog.showModal();
   }
@@ -120,6 +155,7 @@
   }
   async function load(value = '') {
     if (!initData) { status.textContent = 'Откройте меню через Telegram-бота.'; return; }
+    requestedDate = value;
     request?.abort(); request = new AbortController();
     window.dispatchEvent(new Event('menu:loading'));
     status.textContent = 'Загрузка…'; mealsElement.replaceChildren();
@@ -127,7 +163,7 @@
       const response = await fetch('/api/menu' + (value ? '?date=' + encodeURIComponent(value) : ''), { headers: { 'X-Telegram-Init-Data': initData }, signal: request.signal, cache: 'no-store' });
       if (response.status === 401) { status.textContent = 'Не удалось подтвердить Telegram. Закройте и снова откройте меню через бота.'; return; }
       if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await response.json(); date = data.date;
+      const data = await response.json(); date = data.date; photoAdmin = data.photo_admin;
       dateElement.textContent = new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(date + 'T12:00:00Z'));
       render(data);
       window.dispatchEvent(new CustomEvent('menu:loaded', { detail: data }));
