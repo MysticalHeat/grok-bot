@@ -157,7 +157,7 @@ func TestTrayGlobalMealQuota(t *testing.T) {
 	if err := json.Unmarshal(first.Body.Bytes(), &sub); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.decide(context.Background(), sub.ID, nil); err != nil {
+	if err := p.decide(context.Background(), sub.ID, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	check(upload(date, "LUNCH", 2, 1), http.StatusConflict)

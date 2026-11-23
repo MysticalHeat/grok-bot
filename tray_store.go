@@ -273,7 +273,10 @@ func (p *trayPhotos) requeueTray(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
-func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop) error {
+func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rotation int) error {
+	if rotation < 0 || rotation > 3 {
+		return errTrayCrop
+	}
 	seen := map[int64]bool{}
 	for _, c := range crops {
 		if !validTrayCrop(c) || c.DishID <= 0 || seen[c.DishID] {
@@ -298,6 +301,14 @@ func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop) err
 		f.Close()
 		if err != nil {
 			return err
+		}
+		if rotation != 0 {
+			w, h := img.Bounds().Dx(), img.Bounds().Dy()
+			if rotation%2 == 1 {
+				w, h = h, w
+			}
+			// EXIF orientations 6, 3 and 8 are clockwise quarter turns.
+			img = sampleTrayImage(img, w, h, [...]int{1, 6, 3, 8}[rotation])
 		}
 		b := img.Bounds()
 		for _, c := range crops {

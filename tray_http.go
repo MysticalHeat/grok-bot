@@ -367,10 +367,16 @@ func (p *trayPhotos) serveFrame(w http.ResponseWriter, r *http.Request, id int64
 
 func (p *trayPhotos) decideHTTP(w http.ResponseWriter, r *http.Request, id int64) {
 	var input struct {
-		Crops *[]trayCrop `json:"crops"`
+		Crops    *[]trayCrop     `json:"crops"`
+		Rotation json.RawMessage `json:"rotation"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	if err := dec.Decode(&input); err != nil || input.Crops == nil || len(*input.Crops) > 32 || dec.Decode(new(any)) != io.EOF {
+		http.Error(w, "invalid decision", 400)
+		return
+	}
+	rotation := 0
+	if input.Rotation != nil && (string(input.Rotation) == "null" || json.Unmarshal(input.Rotation, &rotation) != nil || rotation < 0 || rotation > 3) {
 		http.Error(w, "invalid decision", 400)
 		return
 	}
@@ -380,7 +386,7 @@ func (p *trayPhotos) decideHTTP(w http.ResponseWriter, r *http.Request, id int64
 			return
 		}
 	}
-	if err := p.decide(r.Context(), id, *input.Crops); err != nil {
+	if err := p.decide(r.Context(), id, *input.Crops, rotation); err != nil {
 		trayHTTPError(w, err)
 		return
 	}
