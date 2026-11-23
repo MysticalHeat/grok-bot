@@ -35,6 +35,8 @@ h2 { font-size: 20px; margin: 0 0 12px; }
 .content { padding: 20px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .content h2 { margin: 0 0 4px; }
 .content p { margin: 8px 0; }
+.remove-dish-image { margin-top: 8px; padding: 0 12px; background: transparent; color: var(--tg-theme-destructive-text-color, #da4848); border: 1px solid currentColor; }
+.remove-dish-image:disabled { opacity: .6; cursor: default; }
 dialog {
   position: fixed;
   width: min(100% - 32px, 520px);
