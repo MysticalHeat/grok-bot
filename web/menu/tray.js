@@ -83,7 +83,7 @@
     section.open = open;
     return section;
   }
-  async function showDetail(id, target) {
+  async function showDetail(id, target, published = false) {
     if (!target.isConnected || (!moderation && !root.open)) return;
     const version = ++detailVersion;
     const visible = () => version === detailVersion && target.isConnected && (moderation || root.open);
@@ -98,6 +98,11 @@
       if (!visible()) return;
       const historyOpen = target.querySelector('.tray-history')?.open ?? false;
       target.replaceChildren(node('h3', summaryText(item)));
+      if (published) {
+        const notice = node('p', 'Выбранные области опубликованы.', 'note');
+        notice.setAttribute('role', 'status');
+        target.append(notice);
+      }
       if (scroll) target.scrollIntoView({ block: 'start' });
       if (item.result?.length) target.append(node('p', 'Опубликовано: ' + item.result.join(', ')));
       else if (item.status === 'closed') target.append(node('p', 'Фото не опубликовано.'));
@@ -132,14 +137,22 @@
         wait(item.scan_running);
         return;
       }
-      if (item.status !== 'review') return;
+      const history = item.status === 'closed' && item.result?.length > 0;
+      if (item.status !== 'review' && !history) return;
+      if (history && !item.frame_available) {
+        target.append(node('p', 'Исходное фото больше недоступно. Редактировать области нельзя.', 'note'));
+        return;
+      }
       try {
         const frame = await (await api(path + '/frame')).blob();
         if (!visible()) return;
         frameURL = URL.createObjectURL(frame);
       } catch {
         if (!visible()) return;
-        target.append(node('p', 'Не удалось открыть исходное фото. Попробуйте открыть заявку заново.', 'tray-error'));
+        target.append(node('p', history
+          ? 'Не удалось открыть исходное фото. Возможно, срок его хранения истёк.'
+          : 'Не удалось открыть исходное фото. Попробуйте открыть заявку заново.', 'tray-error'));
+        if (history) return;
       }
       editor(item, target, frameURL);
     }
@@ -170,6 +183,11 @@
       w: (grip.includes('e') ? clamp(right + dx, x + 1, 1000) : right) - left,
       h: (grip.includes('s') ? clamp(bottom + dy, y + 1, 1000) : bottom) - top,
     };
+  }
+  function rotateCrop({ x, y, w, h }, direction) {
+    return direction === 1
+      ? { x: 1000 - y - h, y: x, w: h, h: w }
+      : { x: y, y: 1000 - x - w, w: h, h: w };
   }
   function photoEditor(target, source, crops, rotation, active, dishName, apply) {
     const draft = crops.map(c => ({ ...c }));
@@ -241,12 +259,7 @@
     function turn(direction) {
       finishGesture(true);
       rotation = (rotation + direction + 4) % 4;
-      for (const c of draft) {
-        const { x, y, w, h } = c;
-        Object.assign(c, direction === 1
-          ? { x: 1000 - y - h, y: x, w: h, h: w }
-          : { x: y, y: 1000 - x - w, w: h, h: w });
-      }
+      for (const c of draft) Object.assign(c, rotateCrop(c, direction));
       draw();
     }
     function finishGesture(cancel) {
@@ -310,11 +323,24 @@
   function editor(item, target, url) {
     const dishes = item.dishes || [];
     const findDish = id => dishes.find(d => String(d.id) === String(id));
-    const crops = (item.suggestions || []).map(s => ({
+    const history = item.status === 'closed';
+    const saved = (item.publication_crops || []).filter(c => findDish(c.dish_id));
+    let rotation = saved[0]?.rotation ?? 0;
+    const crops = history ? saved.map(({ rotation: turns, ...crop }) => {
+      const delta = (rotation - turns + 4) % 4;
+      for (let i = 0; i < delta; i++) Object.assign(crop, rotateCrop(crop, 1));
+      return { ...crop, selected: false, replace: false };
+    }) : (item.suggestions || []).map(s => ({
       ...s, selected: !!s.selected && !findDish(s.dish_id)?.photo_id, replace: false,
     }));
     const original = JSON.stringify(crops);
-    let rotation = 0;
+    if (history) {
+      if (!dishes.length) {
+        target.append(node('p', 'В сохранённом меню больше нет блюд, доступных для этой заявки.', 'note'));
+        return;
+      }
+      target.append(node('p', 'Измените сохранённую рамку или выделите новую область. Обновятся только выбранные блюда.', 'note'));
+    }
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
     const img = node('img'); img.alt = 'Фото подноса для разметки'; img.draggable = false;
@@ -531,7 +557,10 @@
     }
     async function decide(empty) {
       const chosen = empty ? [] : crops.filter(c => c.selected);
-      if (!empty && !chosen.length) { error.textContent = 'Выберите хотя бы одну область или закройте без публикации.'; return; }
+      if (!empty && !chosen.length) {
+        error.textContent = history ? 'Выберите хотя бы одну область для публикации.' : 'Выберите хотя бы одну область или закройте без публикации.';
+        return;
+      }
       const ids = new Set();
       for (const c of chosen) {
         const dish = findDish(c.dish_id);
@@ -546,19 +575,20 @@
           const dish = findDish(dish_id);
           return { dish_id: dish.id, x, y, w, h, replace: replace ? dish.photo_id : '' };
         });
-        await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', {
+        await api('/api/tray/' + encodeURIComponent(item.id) + (history ? '/republish' : '/decision'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ rotation, crops: publish }),
         });
-        if (target.contains(error)) await showDetail(item.id, target);
-        refreshQueue();
+        if (target.contains(error)) await showDetail(item.id, target, history);
+        if (!history) refreshQueue();
+        if (document.querySelector('#moderation-history').open) refreshPublicationHistory();
         if (document.querySelector('#moderation-published').open) refreshPublished();
       } catch (e) { setBusy(false); message(error, e); }
     }
     const actions = node('div', '', 'crop-actions');
     if (item.can_rescan) actions.append(rescan);
     if (url) actions.append(submit);
-    actions.append(close);
+    if (!history) actions.append(close);
     target.append(actions, error);
     if (url) draw();
   }
@@ -665,6 +695,46 @@
       return false;
     }
   }
+  let publicationsVersion = 0;
+  async function refreshPublicationHistory(before = 0) {
+    const section = document.querySelector('#moderation-history');
+    const target = document.querySelector('#moderation-history-list');
+    const version = ++publicationsVersion;
+    const visible = () => version === publicationsVersion && section.open;
+    const status = node('p', 'Загрузка…', 'note');
+    status.setAttribute('role', 'status');
+    if (!before) target.replaceChildren();
+    target.append(status);
+    try {
+      const page = await (await api('/api/tray/publications' + (before ? '?before=' + before : ''))).json();
+      if (!visible()) return;
+      status.remove();
+      if (!before && !page.length) target.append(node('p', 'Публикаций пока нет.', 'note'));
+      for (const item of page) {
+        const row = node('div', '', 'publication-entry');
+        const info = node('div');
+        info.append(node('strong', `${dateLabel(item.date)}, ${labels[item.meal] || item.meal}`),
+          node('p', item.result.join(', ')));
+        if (!item.frame_available) info.append(node('p', 'Исходное фото недоступно.', 'note'));
+        const open = button(item.frame_available ? 'Редактировать фото' : 'Открыть заявку', () =>
+          showDetail(item.id, document.querySelector('#moderation-detail')));
+        row.append(info, open);
+        target.append(row);
+      }
+      if (page.length === 50) target.append(button('Показать ещё', event => {
+        event.currentTarget.remove();
+        refreshPublicationHistory(page.at(-1).id);
+      }));
+    } catch (e) {
+      if (!visible()) return;
+      message(status, e);
+      status.after(button('Повторить', event => {
+        event.currentTarget.remove();
+        status.remove();
+        refreshPublicationHistory(before);
+      }));
+    }
+  }
   async function refreshPublished() {
     const target = document.querySelector('#moderation-photos');
     target.replaceChildren(node('p', 'Загрузка…', 'note'));
@@ -704,6 +774,8 @@
     if (!app?.initData) { status.textContent = 'Откройте страницу через Telegram-бота.'; return; }
     const published = document.querySelector('#moderation-published');
     published.addEventListener('toggle', () => { if (published.open) refreshPublished(); });
+    const history = document.querySelector('#moderation-history');
+    history.addEventListener('toggle', () => { if (history.open) refreshPublicationHistory(); });
     const refresh = document.querySelector('#moderation-refresh');
     refresh.addEventListener('click', async () => {
       refresh.disabled = true;

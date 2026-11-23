@@ -12,6 +12,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"telegram-gemini-bot/internal/llm"
@@ -53,17 +54,28 @@ type trayCrop struct {
 	Replace  string `json:"replace"`
 }
 
+type trayPublicationCrop struct {
+	DishID   int64 `json:"dish_id"`
+	X        int   `json:"x"`
+	Y        int   `json:"y"`
+	W        int   `json:"w"`
+	H        int   `json:"h"`
+	Rotation int   `json:"rotation"`
+}
+
 type traySummary struct {
-	ID          int64      `json:"id"`
-	Date        string     `json:"date"`
-	Meal        string     `json:"meal"`
-	Status      string     `json:"status"`
-	ScanRunning bool       `json:"scan_running,omitempty"`
-	CanRescan   bool       `json:"can_rescan,omitempty"`
-	Reason      string     `json:"reason,omitempty"`
-	Result      []string   `json:"result"`
-	Dishes      []trayDish `json:"dishes,omitempty"`
-	Suggestions []trayCrop `json:"suggestions,omitempty"`
+	ID               int64                 `json:"id"`
+	Date             string                `json:"date"`
+	Meal             string                `json:"meal"`
+	Status           string                `json:"status"`
+	ScanRunning      bool                  `json:"scan_running,omitempty"`
+	CanRescan        bool                  `json:"can_rescan,omitempty"`
+	Reason           string                `json:"reason,omitempty"`
+	Result           []string              `json:"result"`
+	Dishes           []trayDish            `json:"dishes,omitempty"`
+	Suggestions      []trayCrop            `json:"suggestions,omitempty"`
+	FrameAvailable   bool                  `json:"frame_available,omitempty"`
+	PublicationCrops []trayPublicationCrop `json:"publication_crops,omitempty"`
 }
 
 const trayColumns = "id,service_date,meal,status,reason,result,status='queued' AND started_at<>0"
@@ -105,6 +117,11 @@ func initTrayPhotos(store *SQLiteStore) error {
 	CREATE TABLE IF NOT EXISTS tray_published (
 		dish_id INTEGER PRIMARY KEY REFERENCES cafeteria_dishes(id), photo_id TEXT NOT NULL UNIQUE,
 		jpeg BLOB NOT NULL);
+	CREATE TABLE IF NOT EXISTS tray_publication_crops (
+		tray_id INTEGER NOT NULL REFERENCES tray_submissions(id),
+		dish_id INTEGER NOT NULL REFERENCES cafeteria_dishes(id),
+		x INTEGER NOT NULL, y INTEGER NOT NULL, w INTEGER NOT NULL, h INTEGER NOT NULL,
+		rotation INTEGER NOT NULL, PRIMARY KEY(tray_id,dish_id));
 	`)
 	return err
 }
@@ -269,7 +286,77 @@ func (p *trayPhotos) requeueTray(ctx context.Context, id int64) error {
 }
 
 func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rotation int) error {
-	if rotation < 0 || rotation > 3 {
+	return p.publishTray(ctx, id, crops, rotation, false)
+}
+
+type trayPublication struct {
+	frame, status, date, meal, dishes, result string
+	closedAt                                  int64
+}
+
+type trayPublicationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func loadTrayPublication(ctx context.Context, q trayPublicationQueryer, id int64) (trayPublication, error) {
+	var t trayPublication
+	err := q.QueryRowContext(ctx, `SELECT frame,status,service_date,meal,dishes,result,closed_at FROM tray_submissions WHERE id=?`, id).
+		Scan(&t.frame, &t.status, &t.date, &t.meal, &t.dishes, &t.result, &t.closedAt)
+	return t, err
+}
+
+func (p *trayPhotos) canPublishTray(t trayPublication, repeat bool) error {
+	if !repeat {
+		if t.status != "review" {
+			return errTrayConflict
+		}
+		return nil
+	}
+	if t.status != "closed" || t.result == "[]" {
+		return errTrayConflict
+	}
+	if t.frame == "" || !p.trayFrameRetained(t.closedAt) {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (p *trayPhotos) trayFrameRetained(closedAt int64) bool {
+	return closedAt > p.now().Add(-trayRetention).Unix()
+}
+
+func (p *trayPhotos) publicationFrameAvailable(name string, closedAt int64) bool {
+	if !p.trayFrameRetained(closedAt) {
+		return false
+	}
+	path, err := trayFramePath(p.frames, name)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (p *trayPhotos) listPublicationCrops(ctx context.Context, id int64) ([]trayPublicationCrop, error) {
+	rows, err := p.store.db.QueryContext(ctx, `SELECT dish_id,x,y,w,h,rotation
+		FROM tray_publication_crops WHERE tray_id=? ORDER BY dish_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var crops []trayPublicationCrop
+	for rows.Next() {
+		var c trayPublicationCrop
+		if err := rows.Scan(&c.DishID, &c.X, &c.Y, &c.W, &c.H, &c.Rotation); err != nil {
+			return nil, err
+		}
+		crops = append(crops, c)
+	}
+	return crops, rows.Err()
+}
+
+func (p *trayPhotos) publishTray(ctx context.Context, id int64, crops []trayCrop, rotation int, repeat bool) error {
+	if rotation < 0 || rotation > 3 || (repeat && len(crops) == 0) {
 		return errTrayCrop
 	}
 	seen := map[int64]bool{}
@@ -279,16 +366,23 @@ func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rot
 		}
 		seen[c.DishID] = true
 	}
-	var frame, status string
-	if err := p.store.db.QueryRowContext(ctx, `SELECT frame,status FROM tray_submissions WHERE id=?`, id).Scan(&frame, &status); err != nil {
+	t, err := loadTrayPublication(ctx, p.store.db, id)
+	if err != nil {
 		return err
 	}
-	if status != "review" {
-		return errTrayConflict
+	if err := p.canPublishTray(t, repeat); err != nil {
+		return err
 	}
 	var encoded [][]byte
 	if len(crops) > 0 {
-		f, err := os.Open(filepath.Join(p.frames, frame))
+		path, err := trayFramePath(p.frames, t.frame)
+		if err != nil {
+			return sql.ErrNoRows
+		}
+		f, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return sql.ErrNoRows
+		}
 		if err != nil {
 			return err
 		}
@@ -324,20 +418,22 @@ func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rot
 		return err
 	}
 	defer tx.Rollback()
-	var date, meal, snapshot string
-	err = tx.QueryRowContext(ctx, `SELECT service_date,meal,dishes FROM tray_submissions WHERE id=? AND status='review'`, id).Scan(&date, &meal, &snapshot)
-	if errors.Is(err, sql.ErrNoRows) {
-		return errTrayConflict
-	}
+	latest, err := loadTrayPublication(ctx, tx, id)
 	if err != nil {
 		return err
 	}
-	current, err := trayMenuDishes(ctx, tx, date, meal)
+	if err := p.canPublishTray(latest, repeat); err != nil {
+		return err
+	}
+	if latest.frame != t.frame {
+		return errTrayConflict
+	}
+	current, err := trayMenuDishes(ctx, tx, latest.date, latest.meal)
 	if err != nil {
 		return err
 	}
 	var original []trayDish
-	if err := json.Unmarshal([]byte(snapshot), &original); err != nil {
+	if err := json.Unmarshal([]byte(latest.dishes), &original); err != nil {
 		return err
 	}
 	allowed := map[int64]bool{}
@@ -351,6 +447,11 @@ func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rot
 		}
 	}
 	names := []string{}
+	if repeat {
+		if err := json.Unmarshal([]byte(latest.result), &names); err != nil {
+			return err
+		}
+	}
 	for i, c := range crops {
 		d, ok := dishes[c.DishID]
 		if !ok || d.PhotoID != c.Replace {
@@ -360,9 +461,22 @@ func (p *trayPhotos) decide(ctx context.Context, id int64, crops []trayCrop, rot
 			ON CONFLICT(dish_id) DO UPDATE SET photo_id=excluded.photo_id,jpeg=excluded.jpeg`, c.DishID, trayPhotoID(), encoded[i]); err != nil {
 			return err
 		}
-		names = append(names, d.Name)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tray_publication_crops(tray_id,dish_id,x,y,w,h,rotation) VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(tray_id,dish_id) DO UPDATE SET x=excluded.x,y=excluded.y,w=excluded.w,h=excluded.h,rotation=excluded.rotation`,
+			id, c.DishID, c.X, c.Y, c.W, c.H, rotation); err != nil {
+			return err
+		}
+		if !repeat || !slices.Contains(names, d.Name) {
+			names = append(names, d.Name)
+		}
 	}
 	result, _ := json.Marshal(names)
+	if repeat {
+		if _, err := tx.ExecContext(ctx, `UPDATE tray_submissions SET result=? WHERE id=?`, string(result), id); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tray_submissions SET status='closed',closed_at=?,result=? WHERE id=?`, p.now().Unix(), string(result), id); err != nil {
 		return err
 	}

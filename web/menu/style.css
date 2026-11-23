@@ -146,6 +146,11 @@ select, input[type=number] { padding: 8px; border: 1px solid var(--tg-theme-hint
 .moderation-photo { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 0; }
 .moderation-photo strong { flex: 1 1 90px; overflow-wrap: anywhere; }
 .moderation-photo .tray-error { flex-basis: 100%; margin: 0; }
+.publication-entry { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 12px 0; }
+.publication-entry + .publication-entry { border-top: 1px solid var(--tg-theme-secondary-bg-color, #e1e5eb); }
+.publication-entry > div { flex: 1 1 200px; overflow-wrap: anywhere; }
+.publication-entry p { margin: 4px 0 0; }
+.publication-entry button, #moderation-history-list > button { min-height: 44px; padding: 8px 12px; }
 #moderation-status:empty { display: none; }
 @media (max-width: 480px) {
   dialog {
