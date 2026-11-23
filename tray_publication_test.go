@@ -245,6 +245,7 @@ func TestTrayPublicationRepublish(t *testing.T) {
 	if len(before) != 2 || before[1] == "" || before[2] == "" {
 		t.Fatalf("initial publication did not create two photos: %+v", before)
 	}
+	f.request(t, http.MethodPatch, "/api/menu/dish/1/image?rotation=180&photo_id="+before[1], trayPublicationMod, nil, http.StatusNoContent)
 	original := detail()
 	one := trayPublicationHTTPCrop{DishID: 1, X: 100, Y: 150, W: 400, H: 500, Rotation: 1}
 	two := trayPublicationHTTPCrop{DishID: 2, X: 550, Y: 225, W: 350, H: 600, Rotation: 1}
@@ -277,6 +278,10 @@ func TestTrayPublicationRepublish(t *testing.T) {
 	after := photos()
 	if len(after) != 3 || after[1] == before[1] || after[1] == "" || after[2] != before[2] || after[3] == "" {
 		t.Fatalf("want one replacement, one unchanged photo and one new photo: before %v, after %v", before, after)
+	}
+	var rotation int
+	if err := f.p.store.db.QueryRow(`SELECT rotation FROM tray_published WHERE dish_id=1`).Scan(&rotation); err != nil || rotation != 0 {
+		t.Fatalf("replacement inherited the old photo's orientation: got %d, err %v", rotation, err)
 	}
 	f.request(t, http.MethodGet, "/api/tray-photo/"+before[1], 0, nil, http.StatusNotFound)
 	if !bytes.Equal(get("/api/tray-photo/"+after[2]).Body.Bytes(), untouchedImage) {

@@ -79,7 +79,32 @@ func (s *SQLiteStore) initCafeteria() error {
 	if err := s.initVerifiedImages(); err != nil {
 		return err
 	}
-	return initTrayPhotos(s)
+	if err := initTrayPhotos(s); err != nil {
+		return err
+	}
+	return s.initMenuImageRotation()
+}
+
+func (s *SQLiteStore) initMenuImageRotation() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT OR IGNORE INTO cafeteria_migrations(name,applied_at) VALUES('menu-image-rotation-v1',?)`, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return err
+	}
+	for _, table := range []string{"cafeteria_images", "tray_published"} {
+		if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN rotation INTEGER NOT NULL DEFAULT 0 CHECK(rotation IN (0,90,180,270))`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) initVerifiedImages() error {
@@ -289,6 +314,25 @@ func (s *SQLiteStore) saveCafeteriaCard(ctx context.Context, j *cafeteriaJob, c 
 
 type cafeteriaImage struct{ URL, SourceURL, Author, License, LicenseURL, Caption, Status string }
 
+// Set rotation only on the image the moderator saw. An example cannot be
+// edited while a published photo takes precedence over it.
+func (s *SQLiteStore) setMenuDishImageRotation(ctx context.Context, dishID int64, photoID, imageURL string, rotation int) error {
+	query, key := `UPDATE tray_published SET rotation=? WHERE dish_id=? AND photo_id=?`, photoID
+	if photoID == "" {
+		query, key = `UPDATE cafeteria_images SET rotation=? WHERE dish_id=? AND image_url=? AND status='approved'
+			AND NOT EXISTS (SELECT 1 FROM tray_published p WHERE p.dish_id=cafeteria_images.dish_id)`, imageURL
+	}
+	res, err := s.db.ExecContext(ctx, query, rotation, dishID, key)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return errTrayConflict
+	}
+	return err
+}
+
 // Remove the image the moderator saw, suppressing the automatic example even
 // when a tray photo was shown. A moderator can still publish a new tray crop.
 func (s *SQLiteStore) removeMenuDishImage(ctx context.Context, dishID int64, photoID, imageURL string, now time.Time) error {
@@ -303,7 +347,7 @@ func (s *SQLiteStore) removeMenuDishImage(ctx context.Context, dishID int64, pho
 		LEFT JOIN cafeteria_images i ON i.dish_id=d.id AND i.status='approved'
 		WHERE d.id=? AND ((p.photo_id=?) OR (p.photo_id IS NULL AND i.image_url=? AND i.image_url<>''))
 		ON CONFLICT(dish_id) DO UPDATE SET status='removed',checked_at=excluded.checked_at,
-			image_url='',source_url='',author='',license='',license_url='',caption=''`, now.Unix(), dishID, photoID, imageURL)
+			image_url='',source_url='',author='',license='',license_url='',caption='',rotation=0`, now.Unix(), dishID, photoID, imageURL)
 	if err != nil {
 		return err
 	}
@@ -330,7 +374,8 @@ func (s *SQLiteStore) removeMenuDishImage(ctx context.Context, dishID int64, pho
 func (s *SQLiteStore) saveCafeteriaImage(ctx context.Context, j *cafeteriaJob, image cafeteriaImage) error {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO cafeteria_images(dish_id,image_url,source_url,author,license,license_url,caption,status,checked_at)
 		SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM cafeteria_jobs WHERE id=? AND status='running' AND lease_token=?)
-		ON CONFLICT(dish_id) DO UPDATE SET image_url=excluded.image_url,source_url=excluded.source_url,author=excluded.author,license=excluded.license,license_url=excluded.license_url,caption=excluded.caption,status=excluded.status,checked_at=excluded.checked_at`,
+		ON CONFLICT(dish_id) DO UPDATE SET image_url=excluded.image_url,source_url=excluded.source_url,author=excluded.author,license=excluded.license,license_url=excluded.license_url,caption=excluded.caption,status=excluded.status,checked_at=excluded.checked_at,
+			rotation=CASE WHEN cafeteria_images.image_url=excluded.image_url THEN cafeteria_images.rotation ELSE 0 END`,
 		j.DishID, image.URL, image.SourceURL, image.Author, image.License, image.LicenseURL, image.Caption, image.Status, time.Now().Unix(), j.ID, j.Token)
 	if err != nil {
 		return err
