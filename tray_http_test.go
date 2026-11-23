@@ -9,6 +9,9 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,4 +193,149 @@ func TestTrayGlobalMealQuota(t *testing.T) {
 		t.Fatalf("expected the personal daily limit, got %s", daily.Body)
 	}
 	check(upload(nextDate, "DINNER", 2, 9), http.StatusCreated)
+}
+
+func TestTrayModeratorRescan(t *testing.T) {
+	p, ai, now := trayWorkerFixture(t)
+	p.dailyCalls = 3
+	ctx := context.Background()
+	if err := p.store.saveCafeteriaWeek(ctx, []CafeteriaWeeklyPlan{{
+		Date: "2026-11-21", MenusByMealType: map[string][]CafeteriaMenu{"LUNCH": {{MenuID: 7, MenuName: "Рис"}}},
+	}}, now); err != nil {
+		t.Fatal(err)
+	}
+	var dishID int64
+	if err := p.store.db.QueryRow(`SELECT id FROM cafeteria_dishes WHERE external_id=7`).Scan(&dishID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.store.db.Exec(`UPDATE tray_submissions SET dishes=? WHERE id=1`, fmt.Sprintf(`[{"id":%d,"name":"Рис"}]`, dishID)); err != nil {
+		t.Fatal(err)
+	}
+	h := newMenuHandler(p.store, "token", p)
+	request := func(method, path string, user int64, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		if user != 0 {
+			r.Header.Set("X-Telegram-Init-Data", signedInitDataForUser("token", now, user))
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	check := func(w *httptest.ResponseRecorder, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		if w.Code != want {
+			t.Fatalf("HTTP %d, want %d: %s", w.Code, want, w.Body)
+		}
+		return w
+	}
+	detail := func(user int64) traySummary {
+		t.Helper()
+		w := check(request("GET", "/api/tray/1", user, ""), 200)
+		var sub traySummary
+		if err := json.Unmarshal(w.Body.Bytes(), &sub); err != nil {
+			t.Fatal(err)
+		}
+		return sub
+	}
+	pass := func() {
+		t.Helper()
+		if err := p.trayWorkerPass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rescan := func(user int64) *httptest.ResponseRecorder { return request("POST", "/api/tray/1/rescan", user, "") }
+	check(rescan(0), 403)
+	check(rescan(99), 403)
+	check(rescan(1), 409)
+	check(request("POST", "/api/tray/2/rescan", 1, ""), 404)
+	ai.response = fmt.Sprintf(`{"suggestions":[{"dish_id":%d,"x":900,"y":0,"w":500,"h":500,"selected":true}]}`, dishID)
+	pass()
+	if sub := detail(1); sub.Status != "review" || !sub.CanRescan || !strings.Contains(sub.Reason, "выходит за правый край") {
+		t.Fatalf("missing moderator diagnostic: %+v", sub)
+	}
+	if sub := detail(99); sub.Reason != "" || sub.CanRescan {
+		t.Fatalf("uploader saw moderator details: %+v", sub)
+	}
+	if w := check(request("GET", "/api/tray", 99, ""), 200); strings.Contains(w.Body.String(), `"reason"`) {
+		t.Fatalf("uploader list exposed diagnostic: %s", w.Body)
+	}
+	if w := check(request("GET", "/api/tray?moderation=1", 1, ""), 200); !strings.Contains(w.Body.String(), "выходит за правый край") {
+		t.Fatalf("moderation list missing diagnostic: %s", w.Body)
+	}
+	// A retry only enqueues; concurrent duplicate clicks cannot schedule another call.
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() { results <- rescan(1) }()
+	}
+	a, b := <-results, <-results
+	if a.Code == 409 {
+		a, b = b, a
+	}
+	check(a, 202)
+	check(b, 409)
+	if sub := detail(1); sub.Status != "queued" || sub.ScanRunning || sub.CanRescan || sub.Reason != "" || ai.calls != 1 {
+		t.Fatalf("incorrect queued state: %+v (calls=%d)", sub, ai.calls)
+	}
+	check(request("POST", "/api/tray/1/decision", 1, `{"crops":[]}`), 409)
+	ai.response = fmt.Sprintf(`{"suggestions":[{"dish_id":%d,"x":0,"y":0,"w":500,"h":500,"selected":true}]}`, dishID)
+	job, err := p.claimTray(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("claim: %+v %v", job, err)
+	}
+	check(rescan(1), 409)
+	if sub := detail(1); !sub.ScanRunning || sub.CanRescan {
+		t.Fatalf("incorrect running state: %+v", sub)
+	}
+	crops, reason := p.suggestTray(ctx, *job)
+	if err := p.finishTray(ctx, job.id, crops, reason); err != nil {
+		t.Fatal(err)
+	}
+	if sub := detail(1); sub.Status != "review" || len(sub.Suggestions) != 1 || sub.Reason != "" || !sub.CanRescan {
+		t.Fatalf("missing second scan result: %+v", sub)
+	}
+	// Recycling a successful scan is also allowed and shares the same quota.
+	check(rescan(1), 202)
+	pass()
+	w := check(rescan(1), 429)
+	if !strings.Contains(w.Body.String(), "tray_ai_budget") {
+		t.Fatalf("wrong limit response: %s", w.Body)
+	}
+	if sub := detail(1); sub.Status != "review" || len(sub.Suggestions) != 1 {
+		t.Fatalf("limit failure discarded manual review or suggestions: %+v", sub)
+	}
+	if ai.calls != 3 || countRows(t, p.store, "tray_submissions") != 1 || countRows(t, p.store, "tray_published") != 0 {
+		t.Fatalf("unexpected side effects after %d calls", ai.calls)
+	}
+	check(request("POST", "/api/tray/1/decision", 1, `{"crops":[]}`), 204)
+	check(rescan(1), 409)
+}
+
+func TestTrayRescanUnavailableOrMissingFrame(t *testing.T) {
+	p, _, now := trayWorkerFixture(t)
+	ctx := context.Background()
+	if err := p.trayWorkerPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := newMenuHandler(p.store, "token", p)
+	rescan := func(want int) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/api/tray/1/rescan", nil)
+		r.Header.Set("X-Telegram-Init-Data", signedInitDataForUser("token", now, 1))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("rescan: HTTP %d, want %d: %s", w.Code, want, w.Body)
+		}
+	}
+	p.model = ""
+	rescan(503)
+	p.model = "test"
+	if err := os.Remove(filepath.Join(p.frames, "test.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	rescan(410)
+	var status string
+	if err := p.store.db.QueryRow(`SELECT status FROM tray_submissions WHERE id=1`).Scan(&status); err != nil || status != "review" {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
 }

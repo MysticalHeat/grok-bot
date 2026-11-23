@@ -40,7 +40,7 @@ func (p *trayPhotos) workerNow() time.Time {
 }
 
 // run requires exactly one worker instance for this database. started_at is a
-// durable one-way claim, not a lease: an interrupted call must never be retried.
+// durable claim, not a lease: an interrupted call is never retried automatically.
 func (p *trayPhotos) run(ctx context.Context) {
 	if err := p.purgeOrphanTrayFrames(ctx); err != nil {
 		log.Printf("tray orphan cleanup: %v", err)
@@ -118,7 +118,7 @@ func (p *trayPhotos) recoverTrayClaims(ctx context.Context) error {
 		return err
 	}
 	for _, id := range ids {
-		if err := p.finishTray(ctx, id, nil, "AI processing interrupted; manual review required"); err != nil {
+		if err := p.finishTray(ctx, id, nil, "ИИ-скан прервался при остановке сервиса. Запустите скан заново или проверьте фото вручную."); err != nil {
 			return err
 		}
 	}
@@ -181,12 +181,20 @@ func (p *trayPhotos) claimTray(ctx context.Context) (*trayWorkerJob, error) {
 	return &j, nil
 }
 
-func (p *trayPhotos) reserveTrayCall(ctx context.Context) (bool, error) {
-	limit := p.dailyCalls
+func (p *trayPhotos) trayAIEnabled() bool {
+	return p.ai != nil && strings.TrimSpace(p.model) != ""
+}
+
+func (p *trayPhotos) trayCallQuota() (day string, limit int) {
+	limit = p.dailyCalls
 	if limit <= 0 {
 		limit = 20
 	}
-	day := p.workerNow().In(seoulLocation).Format("2006-01-02")
+	return p.workerNow().In(seoulLocation).Format("2006-01-02"), limit
+}
+
+func (p *trayPhotos) reserveTrayCall(ctx context.Context) (bool, error) {
+	day, limit := p.trayCallQuota()
 	// One atomic statement works even if other processes reserve concurrently.
 	result, err := p.store.db.ExecContext(ctx, `INSERT INTO tray_ai_calls(day,calls) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1 WHERE calls<?`, day, limit)
 	if err != nil {
@@ -206,60 +214,74 @@ func trayFramePath(root, name string) (string, error) {
 func (p *trayPhotos) suggestTray(ctx context.Context, j trayWorkerJob) ([]trayCrop, string) {
 	var dishes []trayDish
 	if json.Unmarshal([]byte(j.dishes), &dishes) != nil || len(dishes) == 0 {
-		return nil, "Invalid dish list; manual review required"
+		return nil, "Не удалось прочитать сохранённый список блюд или он пуст."
 	}
 	path, err := trayFramePath(p.frames, j.frame)
 	if err != nil {
-		return nil, "Invalid frame; manual review required"
+		return nil, "Ссылка на исходное фото некорректна."
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, "Frame unavailable; manual review required"
+		return nil, "Не удалось открыть сохранённое фото."
 	}
 	img, _, err := image.Decode(f)
 	f.Close()
 	if err != nil {
-		return nil, "Invalid image; manual review required"
+		return nil, "Сохранённое фото повреждено: не удалось прочитать изображение."
 	}
 	var b bytes.Buffer
 	if err = jpeg.Encode(&b, fitTrayImage(img, 1024), &jpeg.Options{Quality: 85}); err != nil {
-		return nil, "Image conversion failed; manual review required"
+		return nil, "Не удалось подготовить фото для отправки в ИИ."
 	}
-	if p.ai == nil || strings.TrimSpace(p.model) == "" {
-		return nil, "AI unavailable; manual review required"
+	if !p.trayAIEnabled() {
+		return nil, errTrayAIUnavailable.Error()
 	}
 	ok, err := p.reserveTrayCall(ctx)
 	if err != nil {
-		return nil, "AI budget unavailable; manual review required"
+		return nil, "Не удалось проверить дневной лимит ИИ-сканов."
 	}
 	if !ok {
-		return nil, "Daily AI budget exhausted; manual review required"
+		return nil, errTrayAIBudget.Error()
 	}
 	item := &llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
 		"dish_id": {Type: "integer"}, "x": {Type: "integer"}, "y": {Type: "integer"}, "w": {Type: "integer"}, "h": {Type: "integer"}, "selected": {Type: "boolean"}, "reason": {Type: "string"}, "replace": {Type: "string"},
 	}, Required: []string{"dish_id", "x", "y", "w", "h", "selected", "reason", "replace"}}
 	schema := &llm.Schema{Type: "object", Properties: map[string]*llm.Schema{"suggestions": {Type: "array", Items: item}}, Required: []string{"suggestions"}}
-	prompt := "Identify dishes in this tray photo from the supplied list. Return suggestions with dish_id and bounding boxes x,y,w,h in normalized 0-1000 coordinates. Set selected=false and give a short reason in Russian when uncertain. Use dish_id=0 for an unmatched crop. Never invent dish IDs. Dishes: " + j.dishes
+	prompt := "Identify dishes in this tray photo from the supplied list. Return up to 32 suggestions with dish_id and integer bounding boxes x,y,w,h in normalized 0-1000 coordinates. Width and height must be positive, x+w and y+h must not exceed 1000. Select at most one crop per dish. Set selected=false and give a short reason in Russian when uncertain. Use dish_id=0 for an unmatched crop. Never invent dish IDs. Dishes: " + j.dishes
 	callCtx, cancel := context.WithTimeout(ctx, trayAITimeout)
 	defer cancel()
 	resp, err := p.ai.Generate(callCtx, llm.Request{Model: p.model, MaxTokens: 2048, ResponseSchema: schema, Contents: []llm.Content{{Role: "user", Parts: []llm.Part{{Text: prompt}, {Data: b.Bytes(), MimeType: "image/jpeg"}}}}})
 	if err != nil {
-		return nil, "AI request failed; manual review required"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, "ИИ не ответил за 90 секунд."
+		}
+		return nil, "Не удалось получить ответ от сервиса ИИ."
 	}
+	return parseTraySuggestions(resp.Text, dishes)
+}
+
+func parseTraySuggestions(text string, dishes []trayDish) ([]trayCrop, string) {
 	var output struct {
-		Suggestions []struct {
-			DishID   int64  `json:"dish_id"`
-			X        int    `json:"x"`
-			Y        int    `json:"y"`
-			W        int    `json:"w"`
-			H        int    `json:"h"`
-			Selected bool   `json:"selected"`
-			Reason   string `json:"reason"`
-			Replace  string `json:"replace"`
-		} `json:"suggestions"`
+		Suggestions []json.RawMessage `json:"suggestions"`
 	}
-	if err := json.Unmarshal([]byte(resp.Text), &output); err != nil || output.Suggestions == nil || len(output.Suggestions) > 32 {
-		return nil, "Invalid AI response; manual review required"
+	if strings.TrimSpace(text) == "" {
+		return nil, "ИИ вернул пустой ответ вместо JSON с разметкой."
+	}
+	if err := json.Unmarshal([]byte(text), &output); err != nil {
+		var syntax *json.SyntaxError
+		if errors.As(err, &syntax) {
+			return nil, fmt.Sprintf("Ответ ИИ содержит некорректный JSON (позиция: байт %d).", syntax.Offset)
+		}
+		return nil, "Ответ ИИ должен быть JSON-объектом с массивом suggestions."
+	}
+	if output.Suggestions == nil {
+		return nil, "В ответе ИИ нет массива suggestions с предложениями."
+	}
+	if len(output.Suggestions) > 32 {
+		return nil, fmt.Sprintf("Слишком много предложений от ИИ: %d, допустимо не больше 32.", len(output.Suggestions))
+	}
+	if len(output.Suggestions) == 0 {
+		return nil, "ИИ не предложил ни одной области на фото."
 	}
 	allowed := make(map[int64]bool, len(dishes))
 	for _, d := range dishes {
@@ -267,11 +289,10 @@ func (p *trayPhotos) suggestTray(ctx context.Context, j trayWorkerJob) ([]trayCr
 	}
 	selected := map[int64]bool{}
 	crops := make([]trayCrop, 0, len(output.Suggestions))
-	for _, v := range output.Suggestions {
-		reason := []rune(strings.TrimSpace(v.Reason))
-		c := trayCrop{DishID: v.DishID, X: v.X, Y: v.Y, W: v.W, H: v.H, Selected: v.Selected, Reason: string(reason[:min(len(reason), 200)])}
-		if (!allowed[c.DishID] && (c.DishID != 0 || c.Selected)) || !validTrayCrop(c) || (!c.Selected && c.Reason == "") || (c.Selected && selected[c.DishID]) {
-			return nil, "Invalid AI suggestions; manual review required"
+	for i, raw := range output.Suggestions {
+		c, issue := parseTraySuggestion(raw, allowed, selected)
+		if issue != "" {
+			return nil, fmt.Sprintf("Предложение №%d: %s.", i+1, issue)
 		}
 		if c.Selected {
 			selected[c.DishID] = true
@@ -279,6 +300,53 @@ func (p *trayPhotos) suggestTray(ctx context.Context, j trayWorkerJob) ([]trayCr
 		crops = append(crops, c)
 	}
 	return crops, ""
+}
+
+func parseTraySuggestion(raw json.RawMessage, allowed, selected map[int64]bool) (trayCrop, string) {
+	var v struct {
+		DishID   *int64  `json:"dish_id"`
+		X        *int    `json:"x"`
+		Y        *int    `json:"y"`
+		W        *int    `json:"w"`
+		H        *int    `json:"h"`
+		Selected *bool   `json:"selected"`
+		Reason   *string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		var field *json.UnmarshalTypeError
+		if errors.As(err, &field) && field.Field != "" {
+			return trayCrop{}, fmt.Sprintf("поле %s имеет неверный тип", field.Field)
+		}
+		return trayCrop{}, "ожидался JSON-объект с описанием области"
+	}
+	switch {
+	case v.DishID == nil:
+		return trayCrop{}, "отсутствует ID блюда (dish_id)"
+	case v.X == nil || v.Y == nil || v.W == nil || v.H == nil:
+		return trayCrop{}, "не хватает координат или размеров области (x, y, w, h)"
+	case v.Selected == nil:
+		return trayCrop{}, "не указано, выбрана ли область (selected)"
+	}
+	c := trayCrop{DishID: *v.DishID, X: *v.X, Y: *v.Y, W: *v.W, H: *v.H, Selected: *v.Selected}
+	if v.Reason != nil {
+		reason := []rune(strings.TrimSpace(*v.Reason))
+		c.Reason = string(reason[:min(len(reason), 200)])
+	}
+	if issue := trayCropIssue(c); issue != "" {
+		return c, issue
+	}
+	switch {
+	case c.DishID == 0 && c.Selected:
+		return c, "выбрана область без указанного блюда (dish_id = 0)"
+	case c.DishID != 0 && !allowed[c.DishID]:
+		return c, fmt.Sprintf("блюда с ID %d нет в списке для этого фото", c.DishID)
+	case !c.Selected && c.Reason == "":
+		return c, "ИИ не объяснил, почему область не выбрана (reason)"
+	case c.Selected && selected[c.DishID]:
+		return c, fmt.Sprintf("для блюда с ID %d выбрано несколько областей", c.DishID)
+	default:
+		return c, ""
+	}
 }
 
 func (p *trayPhotos) finishTray(ctx context.Context, id int64, crops []trayCrop, reason string) error {

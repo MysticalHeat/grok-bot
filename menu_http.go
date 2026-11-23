@@ -193,7 +193,7 @@ func newMenuHandler(store *SQLiteStore, token string, photoOptions ...*trayPhoto
 			PhotosEnabled  bool                  `json:"photos_enabled"`
 			PhotoAIEnabled bool                  `json:"photo_ai_enabled"`
 			PhotoAdmin     bool                  `json:"photo_admin"`
-		}{date, today, meals, photos != nil, photos != nil && photos.ai != nil, photos != nil && photos.admins[user]})
+		}{date, today, meals, photos != nil, photos != nil && photos.trayAIEnabled(), photos != nil && photos.admins[user]})
 	})
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	return mux

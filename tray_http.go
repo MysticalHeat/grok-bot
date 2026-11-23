@@ -85,6 +85,13 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 	}
 	protected("GET /api/tray/{id}/frame", p.serveFrame)
 	protected("POST /api/tray/{id}/decision", p.decideHTTP)
+	protected("POST /api/tray/{id}/rescan", func(w http.ResponseWriter, r *http.Request, id int64) {
+		if err := p.requeueTray(r.Context(), id); err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
 	protected("DELETE /api/tray/dish/{id}", func(w http.ResponseWriter, r *http.Request, id int64) {
 		res, err := p.store.db.ExecContext(r.Context(), `DELETE FROM tray_published WHERE dish_id=? AND photo_id=?`, id, r.URL.Query().Get("photo_id"))
 		if err != nil {
@@ -143,6 +150,12 @@ func trayHTTPError(w http.ResponseWriter, err error) {
 		trayJSON(w, http.StatusTooManyRequests, map[string]string{"code": "meal_photo_limit"})
 	case errors.Is(err, errTrayQuota):
 		http.Error(w, err.Error(), 429)
+	case errors.Is(err, errTrayAIBudget):
+		trayJSON(w, http.StatusTooManyRequests, map[string]string{"code": "tray_ai_budget", "message": errTrayAIBudget.Error()})
+	case errors.Is(err, errTrayAIUnavailable):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case errors.Is(err, errTrayFrameMissing):
+		http.Error(w, err.Error(), http.StatusGone)
 	case errors.Is(err, errTrayConflict), errors.Is(err, errTrayDuplicate):
 		http.Error(w, err.Error(), 409)
 	case errors.Is(err, errTrayMenu), errors.Is(err, errTrayCrop):
@@ -205,7 +218,8 @@ func (p *trayPhotos) receive(w http.ResponseWriter, r *http.Request, user int64)
 func (p *trayPhotos) list(w http.ResponseWriter, r *http.Request, user int64) {
 	query := `SELECT ` + trayColumns + ` FROM tray_submissions WHERE user_id=? ORDER BY id DESC LIMIT 100`
 	args := []any{user}
-	if r.URL.Query().Get("moderation") == "1" {
+	moderating := r.URL.Query().Get("moderation") == "1"
+	if moderating {
 		if !p.admins[user] {
 			http.Error(w, "forbidden", 403)
 			return
@@ -223,9 +237,12 @@ func (p *trayPhotos) list(w http.ResponseWriter, r *http.Request, user int64) {
 	for rows.Next() {
 		var s traySummary
 		var result string
-		if err := rows.Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result); err != nil {
+		if err := rows.Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result, &s.ScanRunning); err != nil {
 			trayHTTPError(w, err)
 			return
+		}
+		if !moderating {
+			s.Reason = ""
 		}
 		if err := json.Unmarshal([]byte(result), &s.Result); err != nil {
 			trayHTTPError(w, err)
@@ -250,7 +267,7 @@ func (p *trayPhotos) detail(w http.ResponseWriter, r *http.Request, user int64) 
 		return
 	}
 	err = p.store.db.QueryRowContext(r.Context(), `SELECT `+trayColumns+`,user_id,dishes,suggestions FROM tray_submissions WHERE id=?`, id).
-		Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result, &owner, &dishes, &suggestions)
+		Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result, &s.ScanRunning, &owner, &dishes, &suggestions)
 	if err != nil {
 		trayHTTPError(w, err)
 		return
@@ -264,9 +281,12 @@ func (p *trayPhotos) detail(w http.ResponseWriter, r *http.Request, user int64) 
 		return
 	}
 	if p.admins[user] {
+		s.CanRescan = s.Status == "review" && p.trayAIEnabled()
 		var snapshot []trayDish
 		if err := json.Unmarshal([]byte(dishes), &snapshot); err != nil {
-			trayHTTPError(w, err)
+			// The worker may have transitioned to review precisely because
+			// the snapshot was invalid. Keep its diagnostic accessible.
+			trayJSON(w, 200, s)
 			return
 		}
 		if err := json.Unmarshal([]byte(suggestions), &s.Suggestions); err != nil {
@@ -295,6 +315,8 @@ func (p *trayPhotos) detail(w http.ResponseWriter, r *http.Request, user int64) 
 				s.Suggestions[i].Selected = false
 			}
 		}
+	} else {
+		s.Reason = ""
 	}
 	trayJSON(w, 200, s)
 }
