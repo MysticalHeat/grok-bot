@@ -15,6 +15,7 @@ type Request struct {
 
 type Response struct {
 	Text              string
+	RawText           string // Assistant text before normalization, when available.
 	FinishReason      string
 	Usage             *Usage
 	FunctionCalls     []FunctionCall

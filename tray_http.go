@@ -84,6 +84,14 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		})
 	}
 	protected("GET /api/tray/{id}/frame", p.serveFrame)
+	protected("GET /api/tray/{id}/history", func(w http.ResponseWriter, r *http.Request, id int64) {
+		entries, err := p.listTrayHistory(r.Context(), id)
+		if err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		trayJSON(w, http.StatusOK, entries)
+	})
 	protected("POST /api/tray/{id}/decision", p.decideHTTP)
 	protected("POST /api/tray/{id}/rescan", func(w http.ResponseWriter, r *http.Request, id int64) {
 		if err := p.requeueTray(r.Context(), id); err != nil {
