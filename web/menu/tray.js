@@ -41,6 +41,48 @@
     const status = item.scan_running ? 'ИИ сканирует' : statuses[item.status] || item.status;
     return `${dateLabel(item.date)}, ${labels[item.meal] || item.meal} — ${status}`;
   }
+  function scanHistory(path, open) {
+    const section = node('details', '', 'tray-disclosure tray-history');
+    const body = node('div');
+    section.append(node('summary', 'История ИИ-сканов'), body);
+    let version = 0;
+    section.addEventListener('toggle', async () => {
+      const request = ++version;
+      if (!section.open) return;
+      const visible = () => request === version && section.open && section.isConnected;
+      body.replaceChildren(node('p', 'Загрузка истории…', 'note'));
+      try {
+        const entries = await (await api(path + '/history')).json();
+        if (!visible()) return;
+        if (!entries.length) {
+          body.replaceChildren(node('p', 'Нет сохранённых попыток за последние 30 дней.', 'note'));
+          return;
+        }
+        const timeline = node('ol');
+        for (const entry of entries) {
+          const row = node('li');
+          const date = new Date(entry.started_at);
+          const time = node('time', date.toLocaleString('ru-RU'));
+          time.dateTime = entry.started_at;
+          row.append(time, node('strong', entry.attempt > 1 ? 'Автоматический повтор' : 'ИИ-скан'));
+          const meta = entry.finish_reason ? `${entry.model} (${entry.finish_reason})` : entry.model;
+          row.append(node('p', meta, 'note'), node('p', entry.reason || 'Разметка получена.'));
+          if (entry.response) {
+            const response = node('details');
+            response.append(node('summary', entry.response_truncated ? 'Ответ модели (сохранён не полностью)' : 'Ответ модели'));
+            response.append(node('pre', entry.response));
+            row.append(response);
+          }
+          timeline.append(row);
+        }
+        body.replaceChildren(timeline);
+      } catch (error) {
+        if (visible()) message(body, error);
+      }
+    });
+    section.open = open;
+    return section;
+  }
   async function showDetail(id, target) {
     if (!target.isConnected || (!moderation && !root.open)) return;
     const version = ++detailVersion;
@@ -54,12 +96,14 @@
 
     async function render(item, scroll) {
       if (!visible()) return;
+      const historyOpen = target.querySelector('.tray-history')?.open ?? false;
       target.replaceChildren(node('h3', summaryText(item)));
       if (scroll) target.scrollIntoView({ block: 'start' });
       if (item.result?.length) target.append(node('p', 'Опубликовано: ' + item.result.join(', ')));
       else if (item.status === 'closed') target.append(node('p', 'Фото не опубликовано.'));
       if (item.reason) target.append(node('p', item.reason, 'note'));
       if (!moderation) return;
+      target.append(scanHistory(path, historyOpen));
       if (item.status === 'queued') {
         const status = node('p', '', 'note');
         status.setAttribute('role', 'status');

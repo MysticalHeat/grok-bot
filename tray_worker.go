@@ -126,6 +126,7 @@ func (p *trayPhotos) recoverTrayClaims(ctx context.Context) error {
 }
 
 func (p *trayPhotos) trayWorkerPass(ctx context.Context) error {
+	p.purgeTrayHistory(ctx)
 	if err := p.processTrayNotifications(ctx); err != nil {
 		return err
 	}
@@ -249,8 +250,8 @@ func (p *trayPhotos) suggestTray(ctx context.Context, j trayWorkerJob) ([]trayCr
 	// Both attempts share the scan timeout. Each call needs its own quota slot.
 	callCtx, cancel := context.WithTimeout(ctx, trayAITimeout)
 	defer cancel()
-	var reason string
-	for attempt := 0; attempt < 2; attempt++ {
+	var lastRetryReason string
+	for attempt := 1; attempt <= 2; attempt++ {
 		ok, err := p.reserveTrayCall(callCtx)
 		if err != nil {
 			if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
@@ -259,30 +260,42 @@ func (p *trayPhotos) suggestTray(ctx context.Context, j trayWorkerJob) ([]trayCr
 			return nil, "Не удалось проверить дневной лимит ИИ-сканов."
 		}
 		if !ok {
-			if reason != "" {
-				return nil, reason + " Повторный запрос не отправлен: исчерпан дневной лимит ИИ-сканов."
+			if lastRetryReason != "" {
+				return nil, lastRetryReason + " Повторный запрос не отправлен: исчерпан дневной лимит ИИ-сканов."
 			}
 			return nil, errTrayAIBudget.Error()
 		}
+		entry := trayHistoryEntry{StartedAt: p.workerNow(), Attempt: attempt, Model: req.Model}
 		resp, err := p.ai.Generate(callCtx, req)
+		var crops []trayCrop
+		var retry bool
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-				return nil, "ИИ не ответил за 90 секунд."
+				entry.Reason = "ИИ не ответил за 90 секунд."
+			} else {
+				entry.Reason = "Не удалось получить ответ от сервиса ИИ."
 			}
-			return nil, "Не удалось получить ответ от сервиса ИИ."
-		}
-		if resp.FinishReason == "length" {
-			reason = "ИИ не завершил разметку: достигнут лимит длины ответа."
 		} else {
-			crops, diagnostic, retry := parseTraySuggestions(resp.Text, dishes)
-			if !retry {
-				return crops, diagnostic
+			entry.FinishReason = resp.FinishReason
+			entry.Response = resp.RawText
+			if entry.Response == "" {
+				entry.Response = resp.Text
 			}
-			reason = diagnostic
+			if resp.FinishReason == "length" {
+				entry.Reason = "ИИ не завершил разметку: достигнут лимит длины ответа."
+				retry = true
+			} else {
+				crops, entry.Reason, retry = parseTraySuggestions(resp.Text, dishes)
+			}
 		}
+		p.recordTrayHistory(ctx, j.id, entry)
+		if !retry {
+			return crops, entry.Reason
+		}
+		lastRetryReason = entry.Reason
 		req.MaxTokens = 4096
 	}
-	return nil, reason + " Повторный запрос не помог; проверьте фото вручную."
+	return nil, lastRetryReason + " Повторный запрос не помог; проверьте фото вручную."
 }
 
 // Only empty or syntactically invalid replies are retryable here. Do not

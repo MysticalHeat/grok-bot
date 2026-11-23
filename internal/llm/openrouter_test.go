@@ -85,6 +85,17 @@ func TestOpenRouterQuotaError(t *testing.T) {
 	}
 }
 
+func TestOpenRouterPreservesRawAssistantText(t *testing.T) {
+	var decoded openAIChatResponse
+	if err := json.Unmarshal([]byte(`{"choices":[{"message":{"content":" \n{\"suggestions\":[ \n"}}]}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	resp := decoded.toResponse()
+	if resp.Text != `{"suggestions":[` || resp.RawText != " \n{\"suggestions\":[ \n" {
+		t.Fatalf("text=%q raw=%q", resp.Text, resp.RawText)
+	}
+}
+
 func TestRejectNonImageBinary(t *testing.T) {
 	_, err := toOpenAIMessage(Content{Parts: []Part{{Data: []byte("abc"), MimeType: "application/pdf"}}})
 	if err == nil {

@@ -97,6 +97,13 @@ func initTrayPhotos(store *SQLiteStore) error {
 		attempts INTEGER NOT NULL DEFAULT 0, due_at INTEGER NOT NULL,
 		PRIMARY KEY(tray_id,admin_id));
 	CREATE TABLE IF NOT EXISTS tray_ai_calls(day TEXT PRIMARY KEY,calls INTEGER NOT NULL);
+	CREATE TABLE IF NOT EXISTS tray_ai_history (
+		id INTEGER PRIMARY KEY, tray_id INTEGER NOT NULL REFERENCES tray_submissions(id),
+		started_at INTEGER NOT NULL, attempt INTEGER NOT NULL, model TEXT NOT NULL,
+		finish_reason TEXT NOT NULL, reason TEXT NOT NULL, response TEXT NOT NULL,
+		response_truncated INTEGER NOT NULL);
+	CREATE INDEX IF NOT EXISTS tray_ai_history_recent ON tray_ai_history(tray_id,started_at DESC,id DESC);
+	CREATE INDEX IF NOT EXISTS tray_ai_history_expiry ON tray_ai_history(started_at);
 	CREATE TABLE IF NOT EXISTS tray_published (
 		dish_id INTEGER PRIMARY KEY REFERENCES cafeteria_dishes(id), photo_id TEXT NOT NULL UNIQUE,
 		jpeg BLOB NOT NULL);

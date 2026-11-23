@@ -245,8 +245,8 @@ func (r openAIChatResponse) toResponse() Response {
 		return Response{}
 	}
 	m := r.Choices[0].Message
-	text := extractOpenAIText(m.Content)
-	resp := Response{Text: text, FinishReason: r.Choices[0].FinishReason}
+	text, rawText := extractOpenAIText(m.Content)
+	resp := Response{Text: text, RawText: rawText, FinishReason: r.Choices[0].FinishReason}
 	if r.Usage != nil {
 		cost := r.Usage.Cost
 		if r.Usage.IsBYOK {
@@ -276,32 +276,36 @@ func (r openAIChatResponse) toResponse() Response {
 	return resp
 }
 
-func extractOpenAIText(raw json.RawMessage) string {
+func extractOpenAIText(raw json.RawMessage) (text, rawText string) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return ""
+		return "", ""
 	}
 
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		return strings.TrimSpace(text)
+	if err := json.Unmarshal(raw, &rawText); err == nil {
+		return strings.TrimSpace(rawText), rawText
 	}
 
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(raw, &parts); err == nil {
-		chunks := make([]string, 0, len(parts))
-		for _, part := range parts {
-			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
-				chunks = append(chunks, strings.TrimSpace(part.Text))
-			}
-		}
-		return strings.TrimSpace(strings.Join(chunks, "\n"))
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", ""
 	}
 
-	return ""
+	chunks := make([]string, 0, len(parts))
+	var original strings.Builder
+	for _, part := range parts {
+		if part.Type != "text" {
+			continue
+		}
+		original.WriteString(part.Text)
+		if trimmed := strings.TrimSpace(part.Text); trimmed != "" {
+			chunks = append(chunks, trimmed)
+		}
+	}
+	return strings.Join(chunks, "\n"), original.String()
 }
 
 func schemaToMap(schema *Schema) any {
