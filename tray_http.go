@@ -10,6 +10,7 @@ import (
 	"image"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,14 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 			return
 		}
 		p.listPublished(w, r)
+	})
+	mux.HandleFunc("GET /api/tray/publications", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !admin(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		p.listPublicationHistory(w, r)
 	})
 	mux.HandleFunc("GET /api/tray-photo/{photo}", func(w http.ResponseWriter, r *http.Request) {
 		var jpeg []byte
@@ -93,6 +102,9 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		trayJSON(w, http.StatusOK, entries)
 	})
 	protected("POST /api/tray/{id}/decision", p.decideHTTP)
+	protected("POST /api/tray/{id}/republish", func(w http.ResponseWriter, r *http.Request, id int64) {
+		p.publishTrayHTTP(w, r, id, true)
+	})
 	protected("POST /api/tray/{id}/rescan", func(w http.ResponseWriter, r *http.Request, id int64) {
 		if err := p.requeueTray(r.Context(), id); err != nil {
 			trayHTTPError(w, err)
@@ -130,6 +142,46 @@ func (p *trayPhotos) register(mux *http.ServeMux, token string) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func (p *trayPhotos) listPublicationHistory(w http.ResponseWriter, r *http.Request) {
+	before := int64(math.MaxInt64)
+	if cursor := r.URL.Query().Get("before"); cursor != "" {
+		var err error
+		before, err = strconv.ParseInt(cursor, 10, 64)
+		if err != nil || before <= 0 {
+			http.Error(w, "invalid publication cursor", http.StatusBadRequest)
+			return
+		}
+	}
+	rows, err := p.store.db.QueryContext(r.Context(), `SELECT id,service_date,meal,status,result,frame,closed_at
+		FROM tray_submissions WHERE status='closed' AND result<>'[]' AND id<? ORDER BY id DESC LIMIT 50`, before)
+	if err != nil {
+		trayHTTPError(w, err)
+		return
+	}
+	defer rows.Close()
+	items := []traySummary{}
+	for rows.Next() {
+		var s traySummary
+		var result, frame string
+		var closedAt int64
+		if err := rows.Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &result, &frame, &closedAt); err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		if err := json.Unmarshal([]byte(result), &s.Result); err != nil {
+			trayHTTPError(w, err)
+			return
+		}
+		s.FrameAvailable = p.publicationFrameAvailable(frame, closedAt)
+		items = append(items, s)
+	}
+	if err := rows.Err(); err != nil {
+		trayHTTPError(w, err)
+		return
+	}
+	trayJSON(w, http.StatusOK, items)
 }
 
 func (p *trayPhotos) listPublished(w http.ResponseWriter, r *http.Request) {
@@ -278,15 +330,15 @@ func (p *trayPhotos) list(w http.ResponseWriter, r *http.Request, user int64) {
 
 func (p *trayPhotos) detail(w http.ResponseWriter, r *http.Request, user int64) {
 	var s traySummary
-	var result, dishes, suggestions string
-	var owner int64
+	var result, dishes, suggestions, frame string
+	var owner, closedAt int64
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	err = p.store.db.QueryRowContext(r.Context(), `SELECT `+trayColumns+`,user_id,dishes,suggestions FROM tray_submissions WHERE id=?`, id).
-		Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result, &s.ScanRunning, &owner, &dishes, &suggestions)
+	err = p.store.db.QueryRowContext(r.Context(), `SELECT `+trayColumns+`,user_id,dishes,suggestions,frame,closed_at FROM tray_submissions WHERE id=?`, id).
+		Scan(&s.ID, &s.Date, &s.Meal, &s.Status, &s.Reason, &result, &s.ScanRunning, &owner, &dishes, &suggestions, &frame, &closedAt)
 	if err != nil {
 		trayHTTPError(w, err)
 		return
@@ -301,6 +353,14 @@ func (p *trayPhotos) detail(w http.ResponseWriter, r *http.Request, user int64) 
 	}
 	if p.admins[user] {
 		s.CanRescan = s.Status == "review" && p.trayAIEnabled()
+		if s.Status == "closed" && len(s.Result) != 0 {
+			s.FrameAvailable = p.publicationFrameAvailable(frame, closedAt)
+			s.PublicationCrops, err = p.listPublicationCrops(r.Context(), id)
+			if err != nil {
+				trayHTTPError(w, err)
+				return
+			}
+		}
 		var snapshot []trayDish
 		if err := json.Unmarshal([]byte(dishes), &snapshot); err != nil {
 			// The worker may have transitioned to review precisely because
@@ -364,6 +424,10 @@ func (p *trayPhotos) serveFrame(w http.ResponseWriter, r *http.Request, id int64
 }
 
 func (p *trayPhotos) decideHTTP(w http.ResponseWriter, r *http.Request, id int64) {
+	p.publishTrayHTTP(w, r, id, false)
+}
+
+func (p *trayPhotos) publishTrayHTTP(w http.ResponseWriter, r *http.Request, id int64, repeat bool) {
 	var input struct {
 		Crops    *[]trayCrop     `json:"crops"`
 		Rotation json.RawMessage `json:"rotation"`
@@ -384,7 +448,7 @@ func (p *trayPhotos) decideHTTP(w http.ResponseWriter, r *http.Request, id int64
 			return
 		}
 	}
-	if err := p.decide(r.Context(), id, *input.Crops, rotation); err != nil {
+	if err := p.publishTray(r.Context(), id, *input.Crops, rotation, repeat); err != nil {
 		trayHTTPError(w, err)
 		return
 	}
