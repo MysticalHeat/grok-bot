@@ -29,7 +29,7 @@
         if (result?.code === 'tray_ai_budget') throw new Error(result.message);
         throw new Error(result?.code === 'meal_photo_limit'
           ? 'Для этого приёма пищи уже отправили три фото. Выберите другой приём пищи или дату.'
-          : 'Вы достигли личного лимита загрузок на сегодня.');
+          : 'Слишком много запросов. Попробуйте позже.');
       }
       const known = { 401: 'Откройте Mini App заново через Telegram-бота.', 403: 'Эта страница доступна только модератору.', 409: options.body instanceof Blob ? 'Этот файл уже предложен для этого приёма пищи.' : 'Данные изменились. Обновите страницу и попробуйте снова.', 415: 'Поддерживаются только JPEG и PNG.', 413: 'Файл слишком большой.' };
       throw new Error(known[response.status] || (await response.text()) || 'Ошибка: ' + response.status);
