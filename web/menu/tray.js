@@ -102,7 +102,10 @@
   }
   function editor(item, target, url) {
     const dishes = item.dishes || [];
-    const crops = (item.suggestions || []).map(s => ({ ...s, selected: !!s.selected, replace: false }));
+    const findDish = id => dishes.find(d => String(d.id) === String(id));
+    const crops = (item.suggestions || []).map(s => ({
+      ...s, selected: !!s.selected && !findDish(s.dish_id)?.photo_id, replace: false,
+    }));
     const original = JSON.stringify(crops);
     const error = node('p', '', 'tray-error'); error.setAttribute('role', 'status');
     const stage = node('div', '', 'crop-stage');
@@ -112,7 +115,7 @@
     const label = node('div', '', 'crop-label'); label.hidden = true; label.setAttribute('aria-hidden', 'true');
     stage.append(img, boxes, draft, label);
     const list = node('div', '', 'crop-list');
-    const inspectHint = 'Наведите курсор на область или коснитесь её, чтобы увидеть блюдо. Свайп по фото прокручивает страницу.';
+    const inspectHint = 'Наведите курсор на область, чтобы увидеть блюдо. Нажмите на область, чтобы перейти к её форме. Свайп по фото прокручивает страницу.';
     const hint = node('p', inspectHint, 'crop-hint');
     hint.setAttribute('role', 'status');
     const tools = node('div', '', 'crop-tools');
@@ -141,7 +144,13 @@
       hideLabel();
       boxes.replaceChildren(); list.replaceChildren();
       crops.forEach((crop, i) => {
-        const box = button(String(i + 1), () => showLabel(box));
+        const row = node('div', '', 'crop-row');
+        const selected = document.createElement('input'); selected.type = 'checkbox'; selected.checked = crop.selected;
+        const box = button(String(i + 1), () => {
+          if (drawing) return;
+          selected.focus({ preventScroll: true });
+          row.scrollIntoView({ block: 'start' });
+        });
         box.className = 'crop-box crop-target';
         placeBox(box, crop);
         let hovered = false;
@@ -158,9 +167,7 @@
         box.addEventListener('focus', () => { if (box.matches(':focus-visible')) showLabel(box); });
         box.addEventListener('blur', () => { if (activeBox === box && !hovered) hideLabel(); });
         boxes.append(box);
-        const row = node('div', '', 'crop-row');
         const selectLabel = node('label', ' Использовать область ' + (i + 1));
-        const selected = document.createElement('input'); selected.type = 'checkbox'; selected.checked = crop.selected;
         selected.addEventListener('change', () => { crop.selected = selected.checked; }); selectLabel.prepend(selected); row.append(selectLabel);
         const dishLabel = node('label', 'Блюдо '); const select = document.createElement('select');
         const empty = node('option', 'Выберите блюдо'); empty.value = ''; select.append(empty);
@@ -178,8 +185,7 @@
         const replaceLabel = node('label', ' Явно заменить существующее фото');
         const replace = document.createElement('input'); replace.type = 'checkbox'; replace.checked = crop.replace;
         replace.addEventListener('change', () => { crop.replace = replace.checked; }); replaceLabel.prepend(replace); row.append(replaceLabel);
-        function updateDish() {
-          const dish = dishes.find(d => String(d.id) === String(crop.dish_id));
+        function updateDish(dish) {
           box.setAttribute('aria-label', `Область ${i + 1}: ${dish?.name || 'Блюдо не выбрано'}`);
           replaceLabel.hidden = !dish?.photo_id;
           if (activeBox === box) label.textContent = box.getAttribute('aria-label');
@@ -187,9 +193,11 @@
         select.addEventListener('change', () => {
           crop.dish_id = select.value;
           crop.replace = replace.checked = false;
-          updateDish();
+          const dish = findDish(crop.dish_id);
+          if (dish?.photo_id) crop.selected = selected.checked = false;
+          updateDish(dish);
         });
-        updateDish();
+        updateDish(findDish(crop.dish_id));
         if (crop.reason) row.append(node('p', crop.reason, 'note'));
         row.append(button('Удалить область', () => { crops.splice(i, 1); draw(); })); list.append(row);
       });
@@ -291,7 +299,7 @@
       if (!empty && !chosen.length) { error.textContent = 'Выберите хотя бы одну область или закройте без публикации.'; return; }
       const ids = new Set();
       for (const c of chosen) {
-        const dish = dishes.find(d => String(d.id) === String(c.dish_id));
+        const dish = findDish(c.dish_id);
         if (!dish || ids.has(String(dish.id)) || !['x', 'y', 'w', 'h'].every(k => Number.isInteger(c[k])) || c.x < 0 || c.y < 0 || c.w <= 0 || c.h <= 0 || c.x + c.w > 1000 || c.y + c.h > 1000) { error.textContent = 'Проверьте блюдо и координаты областей: размеры должны быть положительными, области — внутри фото, блюда не должны повторяться.'; return; }
         if (dish.photo_id && !c.replace) { error.textContent = 'Для замены существующего фото отметьте явное согласие на замену.'; return; }
         ids.add(String(dish.id));
@@ -299,7 +307,7 @@
       if (empty && !confirm('Закрыть заявку без публикации?')) return;
       setBusy(true);
       try {
-        await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crops: chosen.map(c => { const dish = dishes.find(d => String(d.id) === String(c.dish_id)); return { dish_id: dish.id, x: c.x, y: c.y, w: c.w, h: c.h, replace: c.replace ? dish.photo_id : '' }; }) }) });
+        await api('/api/tray/' + encodeURIComponent(item.id) + '/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crops: chosen.map(c => { const dish = findDish(c.dish_id); return { dish_id: dish.id, x: c.x, y: c.y, w: c.w, h: c.h, replace: c.replace ? dish.photo_id : '' }; }) }) });
         if (target.contains(error)) await showDetail(item.id, target);
         refreshQueue();
         if (document.querySelector('#moderation-published').open) refreshPublished();
